@@ -2177,7 +2177,7 @@ void ADroneActor1::SmoothGlobalPathPoints_PositionOrientation(int32 Iterations /
 			float YawDiffPrev = FMath::Abs(FRotator::NormalizeAxis(OriCurr.Yaw - OriPrev.Yaw));
 			float YawDiffNext = FMath::Abs(FRotator::NormalizeAxis(OriNext.Yaw - OriCurr.Yaw));
 
-			bool bLargeYawChange = (YawDiffPrev > 90.f) || (YawDiffNext > 90.f); // 阈值可调整
+			bool bLargeYawChange = (YawDiffPrev > 60.f) || (YawDiffNext > 60.f); // 阈值可调整
 
 			if (bLargeYawChange)
 			{
@@ -3475,8 +3475,127 @@ void ADroneActor1::GenerateCombinationsHelper(
 	}
 }
 
+FVector ComputeSimpleBottomEdgeEndpoint(
+	const FVector& ViewpointLocation,
+	const FCylindricalInterestPoint& InterestPoint)
+{
+	// 兴趣区域底部平面高度
+	float BottomZ = InterestPoint.BottomCenter.Z;
+
+	// 将视点投影到与底部中心相同高度的平面上
+	FVector ViewpointProjected = FVector(ViewpointLocation.X, ViewpointLocation.Y, BottomZ);
+
+	// 计算从底部中心到投影点的水平向量
+	FVector Dir = (ViewpointProjected - InterestPoint.BottomCenter);
+	// 忽略垂直方向
+	Dir.Z = 0.f;
+
+	// 如果方向向量接近零（视点水平位置几乎与底部中心重合），则无法确定方向
+	if (Dir.IsNearlyZero())
+	{
+		// 退而求其次：选择底部中心向外的某一固定方向（例如X轴正方向）
+		Dir = FVector(1.f, 0.f, 0.f);
+	}
+	else
+	{
+		Dir.Normalize();
+	}
+
+	// 将方向向量乘以半径得到边缘点
+	FVector BottomEdgePoint = InterestPoint.BottomCenter + Dir * InterestPoint.Radius;
+	// 确保高度与底部一致
+	BottomEdgePoint.Z = BottomZ;
+
+	return BottomEdgePoint;
+}
+
+bool ADroneActor1::DoesViewpointSeeTopAndBottom(
+	const FPathPointWithOrientation& Viewpoint,
+	const FCylindricalInterestPoint& InterestPoint)
+{
+	// 计算兴趣区域的顶部和平面位置
+	FVector BottomCenter = InterestPoint.BottomCenter;
+	FVector TopPoint = BottomCenter + FVector(0.f, 0.f, InterestPoint.Height);
+
+	// 计算从视点到顶部和平面的方向向量
+	FVector DirToTop = (TopPoint - Viewpoint.Point).GetSafeNormal();
+	FVector DirToBottomCenter = (BottomCenter - Viewpoint.Point).GetSafeNormal();
+
+	// 获取视点的正前方方向向量
+	FVector CameraForward = Viewpoint.Orientation.Vector();
+
+	// 计算视点正前方与指向顶部/底部中心的夹角
+	float AngleToTop = FMath::Acos(FVector::DotProduct(CameraForward, DirToTop)) * (180.f / PI);
+	float AngleToBottomCenter = FMath::Acos(FVector::DotProduct(CameraForward, DirToBottomCenter)) * (180.f / PI);
+
+	// 假设视点的垂直视场等同于其FOV的一半
+	float HalfFOV = Viewpoint.FOV / 2.0f;
+
+	// 检查视角是否同时覆盖顶部和平面中心
+	if (!(AngleToTop <= HalfFOV && AngleToBottomCenter <= HalfFOV))
+	{
+		return false;
+	}
+
+	// 使用简化函数计算底部边缘终点，避免穿过兴趣区域内部
+	FVector SimpleBottomEndpoint = ComputeSimpleBottomEdgeEndpoint(Viewpoint.Point, InterestPoint);
+
+	// 设置射线检测参数
+	FCollisionQueryParams QueryParams;
+	QueryParams.bTraceComplex = true;
+	QueryParams.AddIgnoredActor(this);
+
+	UWorld* World = GetWorld();
+	if (!World) return false;
+
+	FHitResult HitResultTop;
+	FHitResult HitResultBottom;
+
+	// 射线检测视点到顶部
+	bool bBlockedTop = World->LineTraceSingleByChannel(
+		HitResultTop,
+		Viewpoint.Point,
+		TopPoint,
+		ECC_Visibility,
+		QueryParams
+	);
+
+	// 射线检测视点到底部边缘
+	bool bBlockedBottom = World->LineTraceSingleByChannel(
+		HitResultBottom,
+		Viewpoint.Point,
+		SimpleBottomEndpoint,
+		ECC_Visibility,
+		QueryParams
+	);
+
+	// 如果顶部或底部路径上有障碍物，则返回false
+	if (bBlockedTop || bBlockedBottom)
+	{
+		return false;
+	}
+
+	// 视角覆盖且无障碍物阻挡，返回true
+	return true;
+}
+
+
 bool ADroneActor1::IsCoverageSatisfied(const TArray<FPathPointWithOrientation>& ViewpointGroup)
 {
+	if (ViewpointGroup.Num() == 0)
+	{
+		return false;
+	}
+
+	// 假设所有视点围绕同一兴趣区域，取第一个视点的AOIIndex
+	int32 targetAOIIndex = ViewpointGroup[0].AOIIndex;
+	if (!InterestPoints.IsValidIndex(targetAOIIndex))
+	{
+		return false;
+	}
+	const FCylindricalInterestPoint& TargetInterestPoint = InterestPoints[targetAOIIndex];
+
+	// --- 水平覆盖检查 ---
 	// 创建一个数组来存储所有视点的覆盖范围
 	TArray<FAngleRange> CoverageRanges;
 
@@ -3504,18 +3623,22 @@ bool ADroneActor1::IsCoverageSatisfied(const TArray<FPathPointWithOrientation>& 
 			MergedRanges.Last().UpperBound = FMath::Max(MergedRanges.Last().UpperBound, Range.UpperBound);
 		}
 	}
+	bool bHorizontalCoverageSatisfied = (MergedRanges.Num() == 1 &&
+		MergedRanges[0].UpperBound - MergedRanges[0].LowerBound >= 360.0f);
 
-	// 检查合并后的覆盖范围是否覆盖了整个360度范围
-	if (MergedRanges.Num() == 1 && MergedRanges[0].UpperBound - MergedRanges[0].LowerBound >= 360.0f)
+	// --- 垂直覆盖检查 ---
+	bool bVerticalCoverageSatisfied = false;
+	for (const FPathPointWithOrientation& Viewpoint : ViewpointGroup)
 	{
-		//UE_LOG(LogTemp, Warning, TEXT("Coverage satisfied"));
-		return true;
+		if (DoesViewpointSeeTopAndBottom(Viewpoint, TargetInterestPoint))
+		{
+			bVerticalCoverageSatisfied = true;
+			break;
+		}
 	}
-	else
-	{
-		//UE_LOG(LogTemp, Warning, TEXT("Coverage not satisfied"));
-		return false;
-	}
+
+	return bHorizontalCoverageSatisfied && bVerticalCoverageSatisfied;
+
 }
 
 bool ADroneActor1::IsDistanceSatisfied(const TArray<FPathPointWithOrientation>& ViewpointGroup)

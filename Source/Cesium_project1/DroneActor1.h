@@ -255,6 +255,9 @@ public:
 		TArray<int32> CurrentCombination,
 		TArray<TArray<int32>>& OutCombinations);
 
+	bool DoesViewpointSeeTopAndBottom(
+		const FPathPointWithOrientation& Viewpoint,
+		const FCylindricalInterestPoint& InterestPoint);
 	bool IsCoverageSatisfied(const TArray<FPathPointWithOrientation>& ViewpointGroup);
 
 	bool IsDistanceSatisfied(const TArray<FPathPointWithOrientation>& ViewpointGroup);
