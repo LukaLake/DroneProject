@@ -256,6 +256,9 @@ public:
 		TArray<int32> CurrentCombination,
 		TArray<TArray<int32>>& OutCombinations);
 
+	bool DoesViewpointSeeTop(
+		const FPathPointWithOrientation& Viewpoint,
+		const FCylindricalInterestPoint& InterestPoint);
 	bool DoesViewpointSeeTopAndBottom(
 		const FPathPointWithOrientation& Viewpoint,
 		const FCylindricalInterestPoint& InterestPoint);
@@ -545,6 +548,9 @@ public:
 
 	TSharedPtr<NimaObjectTracker> NimaTracker;
 
+	UPROPERTY() // 使用 UPROPERTY 阻止垃圾回收
+	UMyRRTClass* GlobalRRTClass;
+
 public:
 	void UpdateRotationSpeedForNextPathPoint(float minRotatSpeed = 1.0f, float maxRotateSpeed = 15.0f); // 更新到下一个航点的旋转速度
 
@@ -633,10 +639,20 @@ private: // 权重参数
 	const float QualityCostWeight = 1.0f;
 	const float SmoothnessCostWeight = 0.8f;
 
-	const float AestheticScoreThreshold = 5.0f;
+	const float AestheticScoreThreshold = 4.4f;
 	const float MaxAestheticScore = 10.0f;
 
 	const float DroneRadius = 30.0f;
+
+private:
+	// 用于跟踪尚未加载完成的 Tileset 数量
+	int32 PendingTilesets = 0;
+
+	// 用于在所有 Tileset 加载完成时通知等待
+	TSharedPtr<TPromise<void>> LoadPromise;
+
+	UFUNCTION()
+	void HandleTilesetLoaded();
 
 private:
 	//TArray<FCandidateViewpoint> CandidateViewpoints;

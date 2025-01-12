@@ -124,6 +124,22 @@ void ADroneActor1::BeginPlay()
 	FTimerHandle TimerHandle;
 	GetWorld()->GetTimerManager().SetTimer(TimerHandle, this, &ADroneActor1::InitializeRenderTarget, 0.1f, false);
 
+	// 初始化 RRTClass
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		UE_LOG(LogTemp, Error, TEXT("Failed to get valid World pointer"));
+		return;
+	}
+
+	GlobalRRTClass = NewObject<UMyRRTClass>();
+	if (!GlobalRRTClass)
+	{
+		UE_LOG(LogTemp, Error, TEXT("Failed to create RRTClass"));
+		return;
+	}
+
+	GlobalRRTClass->SetWorld(World);
 
 	// 查找并保存 CesiumGeoreference 引用
 	for (TActorIterator<ACesiumGeoreference> It(GetWorld()); It; ++It)
@@ -178,6 +194,8 @@ void ADroneActor1::BeginPlay()
 
 
 			SceneCaptureComponent->PostProcessSettings = CameraComponent->PostProcessSettings; // 必要！复制所有摄像机设置
+			SceneCaptureComponent->PostProcessSettings.bOverride_MotionBlurAmount = true;
+			SceneCaptureComponent->PostProcessSettings.MotionBlurAmount = 0.0f;
 			SceneCaptureComponent->PostProcessBlendWeight = 1.0f; // 完全应用后处理效果
 			
 			/*SceneCaptureComponent->bOverride_CustomNearClippingPlane = CameraComponent->bUseCustomNearClippingPlane;
@@ -2374,7 +2392,7 @@ void ADroneActor1::GenerateOrbitFlightPath_Internal()
 	int numInterestPoints = 0;
 	int numOptimizedPathPoints = 0;
 
-	Force3DTilesLoad();
+	//Force3DTilesLoad();
 	// 遍历每个兴趣点
 	for (int currentAOIIndex = 0;currentAOIIndex < InterestPoints.Num();currentAOIIndex++)
 	{
@@ -2396,7 +2414,7 @@ void ADroneActor1::GenerateOrbitFlightPath_Internal()
 		CalculateOrbitParameters(InterestPoint, 
 			OrbitRadius,OrbitRadius1,OrbitRadius2,
 			MinHeight, MaxHeight);
-		TArray<float> AllRadius = { OrbitRadius,OrbitRadius1,OrbitRadius2 };
+		TArray<float> AllRadius = { OrbitRadius,OrbitRadius1};
 
 		TArray<float> Heights;
 		Heights.Add(MinHeight);
@@ -2461,6 +2479,11 @@ void ADroneActor1::GenerateOrbitFlightPath_Internal()
 		// 生成并选择最佳视点组合
 		TArray<TArray<FPathPointWithOrientation>> BestViewpointCombinations;
 		SelectBestViewpointGroups(currentInterestArea.PathPoints, BestViewpointCombinations);
+
+		if (BestViewpointCombinations.Num() == 0) {
+			UE_LOG(LogTemp, Error, TEXT("No viewpoint combinations generated!"));
+			return;
+		}
 
 		// 存储最佳曲线及其代价
 		TArray<FPathPointWithOrientation> BestSplinePoints;
@@ -2599,7 +2622,7 @@ void ADroneActor1::GenerateOrbitFlightPath_Internal()
 
 	GlobalPathPoints.Append(FinalPath);
 
-	SmoothGlobalPathPoints_PositionOrientation(2);
+	SmoothGlobalPathPoints_PositionOrientation(1);
 
 	// 计算所有速度
 	ComputeSpeedByCurvatureAndViewChange(fMaxFlightSpeed,fMinFlightSpeed);
@@ -2860,10 +2883,20 @@ FPathPointWithOrientation ADroneActor1::GenerateCandidateViewpoints(
 	return bestPathPoint;
 }
 
+void ADroneActor1::HandleTilesetLoaded()
+{
+	// 每当一个 Tileset 加载完成，减少计数
+	PendingTilesets--;
+
+	// 当所有 Tileset 都加载完成时，设置 Promise
+	if (PendingTilesets <= 0 && LoadPromise.IsValid())
+	{
+		LoadPromise->SetValue();
+	}
+}
+
 // 强制加载所有瓦片
 void ADroneActor1::Force3DTilesLoad() {
-	// 创建同步事件
-	//FEvent* SyncEvent = FPlatformProcess::CreateSynchEvent(false);
 	TPromise<void> Promise;
 	TFuture<void> Future = Promise.GetFuture();
 
@@ -2876,12 +2909,12 @@ void ADroneActor1::Force3DTilesLoad() {
 			{
 				for (AActor* Actor : FoundActors)
 				{
-					ACesium3DTileset* Tileset = Cast<ACesium3DTileset>(Actor);
-					if (Tileset)
+					if (ACesium3DTileset* Tileset = Cast<ACesium3DTileset>(Actor))
 					{
-						Tileset->EnableFrustumCulling = false; // 禁用视锥体剔除，强制加载所有相关瓦片
-						Tileset->EnableFogCulling = false;
-						//Tileset->RefreshTileset(); // 刷新瓦片加载
+						Tileset->EnableFrustumCulling = false;  // 禁用视锥体剔除，强制加载所有相关瓦片
+						Tileset->EnableFogCulling = false;      // 禁用雾剔除
+						//Tileset->SetCreatePhysicsMeshes(true);  // 确保物理碰撞体生成
+
 						UE_LOG(LogTemp, Log, TEXT("Tileset updated: %s"), *Tileset->GetName());
 					}
 				}
@@ -2892,18 +2925,16 @@ void ADroneActor1::Force3DTilesLoad() {
 			}
 
 			// 任务完成，触发事件
-			//SyncEvent->Trigger();
-			Promise.SetValue(); // 通知任务完成
+			Promise.SetValue();
 		});
 
 	// 等待任务完成
-	//SyncEvent->Wait();
-	//FPlatformProcess::ReturnSynchEventToPool(SyncEvent); // 清理事件对象
 	Future.Wait();
 	UE_LOG(LogTemp, Log, TEXT("Force3DTilesLoad completed."));
 }
 
-// 禁用强制加载3D瓦片
+
+// 禁用强制加载3D瓦片	
 void ADroneActor1::DisableForce3DTilesLoad() {
 	TPromise<void> Promise;
 	TFuture<void> Future = Promise.GetFuture();
@@ -3352,7 +3383,7 @@ void ADroneActor1::SelectBestViewpointGroups(
 
 	// 创建一个异步任务计数器
 	FThreadSafeCounter TaskCounter(ScoredViewpoints.Num());
-	// NimaTracker->IfSaveImage = true; // 决定是否保存美学评分的图像
+	NimaTracker->IfSaveImage = true; // 决定是否保存美学评分的图像
 	// 为每个视点创建异步推理任务
 	for (FPathPointWithOrientation& Viewpoint : ScoredViewpoints)
 	{
@@ -3395,16 +3426,17 @@ void ADroneActor1::SelectBestViewpointGroups(
 		FPlatformProcess::Sleep(0.001f);
 	}
 
-	//NimaTracker->IfSaveImage = false;
+	NimaTracker->IfSaveImage = false;
 	UE_LOG(LogTemp, Warning, TEXT("Aesthetic Computation Completed"));
 
 	// ... (其余代码保持不变)
 
 	// 筛选美学评分高于阈值的视点
+	// 以及视点是否看到了兴趣点的顶部
 	TArray<FPathPointWithOrientation> FilteredViewpoints;
 	for (const FPathPointWithOrientation& Viewpoint : ScoredViewpoints)
 	{
-		if (Viewpoint.AestheticScore >= AestheticScoreThreshold)
+		if (Viewpoint.AestheticScore >= AestheticScoreThreshold&&DoesViewpointSeeTop(Viewpoint, InterestPoints[Viewpoint.AOIIndex]))
 		{
 			FilteredViewpoints.Add(Viewpoint);
 		}
@@ -3528,11 +3560,46 @@ FVector ComputeSimpleBottomEdgeEndpoint(
 	}
 
 	// 将方向向量乘以半径得到边缘点
+	// 或许使用中心而不是底部更宽泛一些
 	FVector BottomEdgePoint = InterestPoint.BottomCenter + Dir * InterestPoint.Radius;
 	// 确保高度与底部一致
 	BottomEdgePoint.Z = BottomZ;
 
 	return BottomEdgePoint;
+}
+
+FVector ComputeSimpleTopEdgeEndpoint(
+	const FVector& ViewpointLocation,
+	const FCylindricalInterestPoint& InterestPoint)
+{
+	// 兴趣区域顶部平面高度
+	float TopZ = InterestPoint.BottomCenter.Z+ InterestPoint.Height;
+
+	// 将视点投影到与顶部中心相同高度的平面上
+	FVector ViewpointProjected = FVector(ViewpointLocation.X, ViewpointLocation.Y, TopZ);
+
+	// 计算从顶部中心到投影点的水平向量
+	FVector Dir = (ViewpointProjected - (InterestPoint.BottomCenter+ InterestPoint.Height));
+	// 忽略垂直方向
+	Dir.Z = 0.f;
+
+	// 如果方向向量接近零（视点水平位置几乎与顶部中心重合），则无法确定方向
+	if (Dir.IsNearlyZero())
+	{
+		// 退而求其次：选择底部中心向外的某一固定方向（例如X轴正方向）
+		Dir = FVector(1.f, 0.f, 0.f);
+	}
+	else
+	{
+		Dir.Normalize();
+	}
+
+	// 将方向向量乘以半径得到边缘点
+	FVector TopEdgePoint = InterestPoint.BottomCenter + InterestPoint.Height + Dir * InterestPoint.Radius;
+	// 确保高度与底部一致
+	TopEdgePoint.Z = TopZ;
+
+	return TopEdgePoint;
 }
 
 bool ADroneActor1::DoesViewpointSeeTopAndBottom(
@@ -3541,7 +3608,7 @@ bool ADroneActor1::DoesViewpointSeeTopAndBottom(
 {
 	// 计算兴趣区域的顶部和平面位置
 	FVector BottomCenter = InterestPoint.BottomCenter;
-	FVector TopPoint = BottomCenter + FVector(0.f, 0.f, InterestPoint.Height);
+	FVector TopPoint = BottomCenter + FVector(0.f, 0.f, InterestPoint.Height+ InterestPoint.MinSafetyDistance);
 
 	// 计算从视点到顶部和平面的方向向量
 	FVector DirToTop = (TopPoint - Viewpoint.Point).GetSafeNormal();
@@ -3551,8 +3618,8 @@ bool ADroneActor1::DoesViewpointSeeTopAndBottom(
 	FVector CameraForward = Viewpoint.Orientation.Vector();
 
 	// 计算视点正前方与指向顶部/底部中心的夹角
-	float AngleToTop = FMath::Acos(FVector::DotProduct(CameraForward, DirToTop)) * (180.f / PI);
-	float AngleToBottomCenter = FMath::Acos(FVector::DotProduct(CameraForward, DirToBottomCenter)) * (180.f / PI);
+	float AngleToTop = abs(FMath::Acos(FVector::DotProduct(CameraForward, DirToTop)) * (180.f / PI));
+	float AngleToBottomCenter = abs(FMath::Acos(FVector::DotProduct(CameraForward, DirToBottomCenter)) * (180.f / PI));
 
 	// 假设视点的垂直视场等同于其FOV的一半
 	float HalfFOV = Viewpoint.FOV / 2.0f;
@@ -3565,6 +3632,7 @@ bool ADroneActor1::DoesViewpointSeeTopAndBottom(
 
 	// 使用简化函数计算底部边缘终点，避免穿过兴趣区域内部
 	FVector SimpleBottomEndpoint = ComputeSimpleBottomEdgeEndpoint(Viewpoint.Point, InterestPoint);
+	FVector SimpleTopEndpoint = ComputeSimpleTopEdgeEndpoint(Viewpoint.Point, InterestPoint);
 
 	// 设置射线检测参数
 	FCollisionQueryParams QueryParams;
@@ -3581,7 +3649,7 @@ bool ADroneActor1::DoesViewpointSeeTopAndBottom(
 	bool bBlockedTop = World->LineTraceSingleByChannel(
 		HitResultTop,
 		Viewpoint.Point,
-		TopPoint,
+		SimpleTopEndpoint,
 		ECC_Visibility,
 		QueryParams
 	);
@@ -3597,6 +3665,64 @@ bool ADroneActor1::DoesViewpointSeeTopAndBottom(
 
 	// 如果顶部或底部路径上有障碍物，则返回false
 	if (bBlockedTop || bBlockedBottom)
+	{
+		return false;
+	}
+
+	// 视角覆盖且无障碍物阻挡，返回true
+	return true;
+}
+
+bool ADroneActor1::DoesViewpointSeeTop(
+	const FPathPointWithOrientation& Viewpoint,
+	const FCylindricalInterestPoint& InterestPoint)
+{
+	// 计算兴趣区域的顶部和平面位置
+	FVector BottomCenter = InterestPoint.BottomCenter;
+	FVector TopPoint = BottomCenter + FVector(0.f, 0.f, InterestPoint.Height + InterestPoint.MinSafetyDistance);
+
+	// 计算从视点到顶部和平面的方向向量
+	FVector DirToTop = (TopPoint - Viewpoint.Point).GetSafeNormal();
+
+	// 获取视点的正前方方向向量
+	FVector CameraForward = Viewpoint.Orientation.Vector();
+
+	// 计算视点正前方与指向顶部/底部中心的夹角
+	float AngleToTop = abs(FMath::Acos(FVector::DotProduct(CameraForward, DirToTop)) * (180.f / PI));
+
+	// 假设视点的垂直视场等同于其FOV的一半
+	float HalfFOV = Viewpoint.FOV / 2.0f;
+
+	// 检查视角是否同时覆盖顶部和平面中心
+	if (!(AngleToTop <= HalfFOV ))
+	{
+		return false;
+	}
+
+	// 使用简化函数计算顶部边缘终点，避免穿过兴趣区域内部
+	FVector SimpleTopEndpoint = ComputeSimpleTopEdgeEndpoint(Viewpoint.Point, InterestPoint);
+
+	// 设置射线检测参数
+	FCollisionQueryParams QueryParams;
+	QueryParams.bTraceComplex = true;
+	QueryParams.AddIgnoredActor(this);
+
+	UWorld* World = GetWorld();
+	if (!World) return false;
+
+	FHitResult HitResultTop;
+
+	// 射线检测视点到顶部
+	bool bBlockedTop = World->LineTraceSingleByChannel(
+		HitResultTop,
+		Viewpoint.Point,
+		SimpleTopEndpoint,
+		ECC_Visibility,
+		QueryParams
+	);
+
+	// 如果顶部路径上有障碍物，则返回false
+	if (bBlockedTop)
 	{
 		return false;
 	}
@@ -3653,15 +3779,20 @@ bool ADroneActor1::IsCoverageSatisfied(const TArray<FPathPointWithOrientation>& 
 		MergedRanges[0].UpperBound - MergedRanges[0].LowerBound >= 360.0f);
 
 	// --- 垂直覆盖检查 ---
-	bool bVerticalCoverageSatisfied = false;
+	int VerticalCoverageCount = 0;
 	for (const FPathPointWithOrientation& Viewpoint : ViewpointGroup)
 	{
 		if (DoesViewpointSeeTopAndBottom(Viewpoint, TargetInterestPoint))
 		{
-			bVerticalCoverageSatisfied = true;
-			break;
+			VerticalCoverageCount++;
+			if (VerticalCoverageCount >= 2)
+			{
+				break;
+			}
 		}
+
 	}
+	bool bVerticalCoverageSatisfied = (VerticalCoverageCount >= 2);
 
 	return bHorizontalCoverageSatisfied && bVerticalCoverageSatisfied;
 
@@ -4802,27 +4933,36 @@ bool ADroneActor1::BuildSTSPCostMatrix(TArray<FDoubleArray>& OutCostMatrix)
 			return (NodeIndex - 2) / 2;
 		};
 
-	TFuture<UMyRRTClass*> MyFuture;
+	//TFuture<UMyRRTClass*> MyFuture;
+	//{
+	//	// 创建Promise
+	//	TSharedRef<TPromise<UMyRRTClass*>> Promise = MakeShared<TPromise<UMyRRTClass*>>();
+	//	// 拿到对应的Future
+	//	MyFuture = Promise->GetFuture();
+
+	//	// 在异步线程里发起请求
+	//	AsyncTask(ENamedThreads::GameThread, [Promise,this]()
+	//		{
+	//			// 切到主线程执行NewObject
+	//			UMyRRTClass* RRTClass = NewObject<UMyRRTClass>();
+	//			RRTClass->SetWorld(GetWorld());
+
+	//			// 通知Promise
+	//			Promise->SetValue(RRTClass);
+	//		});
+	//}
+
+	//// 等待或轮询
+	//UMyRRTClass* RRTClass = MyFuture.Get(); // Get()会阻塞直到SetValue被调用
+
+	// 使用前检查有效性
+	if (!GlobalRRTClass)
 	{
-		// 创建Promise
-		TSharedRef<TPromise<UMyRRTClass*>> Promise = MakeShared<TPromise<UMyRRTClass*>>();
-		// 拿到对应的Future
-		MyFuture = Promise->GetFuture();
-
-		// 在异步线程里发起请求
-		AsyncTask(ENamedThreads::GameThread, [Promise]()
-			{
-				// 切到主线程执行NewObject
-				UMyRRTClass* RRTClass = NewObject<UMyRRTClass>();
-				RRTClass->SetWorld(GEngine->GetWorldFromContextObjectChecked(GWorld));
-
-				// 通知Promise
-				Promise->SetValue(RRTClass);
-			});
+		UE_LOG(LogTemp, Error, TEXT("RRTClass is not valid"));
+		return false;
 	}
 
-	// 等待或轮询
-	UMyRRTClass* RRTClass = MyFuture.Get(); // Get()会阻塞直到SetValue被调用
+	UMyRRTClass* RRTClass = GlobalRRTClass;
 
 	int Progress = 0;
 	int TotalComputation = NumNodes * NumNodes;
@@ -5510,8 +5650,9 @@ void ADroneActor1::OnLeftMouseClick()
 				NewInterestPoint.BottomCenter = CenterPoint;
 				NewInterestPoint.Center = FVector(CenterPoint.X, CenterPoint.Y, CenterPoint.Z + Height / 2); // 兴趣区域体积中心
 				NewInterestPoint.Radius = Radius;
+				NewInterestPoint.MinSafetyDistance = 100.0f; // 根据需要设置
 				NewInterestPoint.Height = Height;
-				NewInterestPoint.MinSafetyDistance = 200.0f; // 根据需要设置
+				
 
 				InterestPoints.Add(NewInterestPoint);
 

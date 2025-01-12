@@ -607,17 +607,17 @@ bool UMyRRTClass::IsTrajectoryCollisionFree(const TArray<FVector>& Trajectory,
     const TArray<FCylindricalInterestPoint>& Obstacles,
     float Threshold)
 {
-    if (!World)
+    // 使用 TWeakObjectPtr 安全地引用 World
+    TWeakObjectPtr<UWorld> WeakWorld = World;
+
+    if (!WeakWorld.IsValid())
     {
         UE_LOG(LogTemp, Warning, TEXT("World is nullptr"));
         return false;
     }
 
     std::atomic<bool> bCollisionDetected(false);
-    // 存储需要进行物理查询的采样点
-    TArray<FVector> SamplePoints;
-    // 使用线程安全的锁保护 SamplePoints 数组操作
-    FCriticalSection SamplePointsMutex;
+    FCriticalSection WorldMutex; // 用于保护对 World 的访问
 
     // 遍历轨迹段
     for (int32 i = 1; i < Trajectory.Num() && !bCollisionDetected.load(); ++i)
@@ -634,7 +634,11 @@ bool UMyRRTClass::IsTrajectoryCollisionFree(const TArray<FVector>& Trajectory,
 
         int32 NumSteps = FMath::CeilToInt(SegmentLength / Threshold);
 
-        // 使用 ParallelFor 处理非物理查询部分
+        // 存储采样点
+        TArray<FVector> SamplePoints;
+        SamplePoints.Reserve(NumSteps + 1);
+
+        // 使用 ParallelFor 生成采样点并检测圆柱体碰撞
         ParallelFor(NumSteps + 1, [&](int32 Step)
             {
                 if (bCollisionDetected.load())
@@ -656,12 +660,8 @@ bool UMyRRTClass::IsTrajectoryCollisionFree(const TArray<FVector>& Trajectory,
                     }
                 }
 
-                // 将 SamplePoint 加入待物理查询列表
-                {
-                    // 使用锁保护对 SamplePoints 的访问
-                    FScopeLock Lock(&SamplePointsMutex);
-                    SamplePoints.Add(SamplePoint);
-                }
+                // 将采样点加入列表
+                SamplePoints.Add(SamplePoint);
             });
 
         // 如果在并行过程中检测到圆柱体碰撞，则提前退出
@@ -671,34 +671,50 @@ bool UMyRRTClass::IsTrajectoryCollisionFree(const TArray<FVector>& Trajectory,
             return false;
         }
 
-        // 在主线程进行物理查询检测
-        for (const FVector& SamplePoint : SamplePoints)
-        {
-            // 如果已经检测到碰撞，跳出循环
-            if (bCollisionDetected.load())
+        // 批量调度物理碰撞检测到主线程
+        TSharedRef<TPromise<bool>> Promise = MakeShared<TPromise<bool>>();
+        TFuture<bool> Future = Promise->GetFuture();
+
+        AsyncTask(ENamedThreads::GameThread, [WeakWorld, Promise, SamplePoints, Threshold, &WorldMutex]() mutable
             {
-                break;
-            }
+                bool CollisionDetected = false;
 
-            FHitResult HitResult;
-            FVector TraceStart = SamplePoint - FVector(1.0f, 1.0f, 1.0f) * Threshold;
-            FVector TraceEnd = SamplePoint + FVector(1.0f, 1.0f, 1.0f) * Threshold;
+                // 使用 FScopeLock 保护对 World 的访问
+                FScopeLock Lock(&WorldMutex);
 
-            FCollisionQueryParams LocalQueryParams;
-            LocalQueryParams.bTraceComplex = true;
-            LocalQueryParams.bReturnPhysicalMaterial = false;
+                if (!WeakWorld.IsValid())
+                {
+                    UE_LOG(LogTemp, Error, TEXT("World is no longer valid in AsyncTask"));
+                    Promise->SetValue(false); // 如果 World 无效，直接返回 false
+                    return;
+                }
 
-            if (World->LineTraceSingleByChannel(HitResult, TraceStart, TraceEnd, ECC_WorldStatic, LocalQueryParams) ||
-                World->LineTraceSingleByChannel(HitResult, TraceStart, TraceEnd, ECC_WorldDynamic, LocalQueryParams))
-            {
-                bCollisionDetected.store(true);
-                UE_LOG(LogTemp, Warning, TEXT("Collision with World detected at point: %s"), *SamplePoint.ToString());
-                break;
-            }
-        }
+                UWorld* World = WeakWorld.Get();
+                for (const FVector& SamplePoint : SamplePoints)
+                {
+                    if (CollisionDetected)
+                    {
+                        break;
+                    }
 
-        // 清空 SamplePoints，为下一个轨迹段做准备
-        SamplePoints.Reset();
+                    FHitResult HitResult;
+                    FVector TraceStart = SamplePoint - FVector(1.0f, 1.0f, 1.0f) * Threshold;
+                    FVector TraceEnd = SamplePoint + FVector(1.0f, 1.0f, 1.0f) * Threshold;
+
+                    FCollisionQueryParams LocalQueryParams;
+                    if (World->LineTraceSingleByChannel(HitResult, TraceStart, TraceEnd, ECC_Visibility, LocalQueryParams))
+                    {
+                        CollisionDetected = true;
+                        UE_LOG(LogTemp, Warning, TEXT("Collision with World detected at point: %s"), *SamplePoint.ToString());
+                        break;
+                    }
+                }
+
+                Promise->SetValue(CollisionDetected);
+            });
+
+        // 在后台线程等待主线程任务完成
+        bCollisionDetected.store(Future.Get());
 
         if (bCollisionDetected.load())
         {
