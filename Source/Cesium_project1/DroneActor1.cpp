@@ -3395,7 +3395,7 @@ void ADroneActor1::SelectBestViewpointGroups(
 		FPlatformProcess::Sleep(0.001f);
 	}
 
-	NimaTracker->IfSaveImage = false;
+	//NimaTracker->IfSaveImage = false;
 	UE_LOG(LogTemp, Warning, TEXT("Aesthetic Computation Completed"));
 
 	// ... (其余代码保持不变)
@@ -3413,7 +3413,7 @@ void ADroneActor1::SelectBestViewpointGroups(
 	// 生成视点组合
 	TArray<TArray<FPathPointWithOrientation>> ViewpointGroups;
 	GenerateViewpointGroups(FilteredViewpoints, NumViewpointsPerGroup, ViewpointGroups);
-
+	UE_LOG(LogTemp, Warning, TEXT("Number of viewpoint groups: %d"), ViewpointGroups.Num());
 	// 筛选满足覆盖度和距离约束的视点组合
 	TArray<TArray<FPathPointWithOrientation>> ValidViewpointGroups;
 	for (const auto& Group : ViewpointGroups)
@@ -3463,6 +3463,7 @@ void ADroneActor1::GenerateViewpointGroups(
 	const int32 NumViewpoints = Viewpoints.Num();
 
 	// 生成所有可能的视点组合
+	UE_LOG(LogTemp, Warning, TEXT("Number of viewpoints: %d"), NumViewpoints);
 	TArray<TArray<int32>> IndexCombinations;
 	GenerateCombinationsHelper(NumViewpoints, GroupSize, TArray<int32>(), IndexCombinations);
 

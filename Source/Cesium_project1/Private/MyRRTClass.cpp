@@ -603,19 +603,21 @@ bool UMyRRTClass::IsPointInCylinder(const FVector& Point, const FCylindricalInte
 }
 
 
-bool UMyRRTClass::IsTrajectoryCollisionFree(const TArray<FVector>& Trajectory, const TArray<FCylindricalInterestPoint>& Obstacles, float Threshold)
+bool UMyRRTClass::IsTrajectoryCollisionFree(const TArray<FVector>& Trajectory,
+    const TArray<FCylindricalInterestPoint>& Obstacles,
+    float Threshold)
 {
-    if (!World) 
+    if (!World)
     {
-		UE_LOG(LogTemp, Warning, TEXT("World is nullptr"));
+        UE_LOG(LogTemp, Warning, TEXT("World is nullptr"));
         return false;
     }
 
-    FCollisionQueryParams QueryParams;
-    QueryParams.bTraceComplex = true;
-    QueryParams.bReturnPhysicalMaterial = false;
-
     std::atomic<bool> bCollisionDetected(false);
+    // 存储需要进行物理查询的采样点
+    TArray<FVector> SamplePoints;
+    // 使用线程安全的锁保护 SamplePoints 数组操作
+    FCriticalSection SamplePointsMutex;
 
     // 遍历轨迹段
     for (int32 i = 1; i < Trajectory.Num() && !bCollisionDetected.load(); ++i)
@@ -632,12 +634,11 @@ bool UMyRRTClass::IsTrajectoryCollisionFree(const TArray<FVector>& Trajectory, c
 
         int32 NumSteps = FMath::CeilToInt(SegmentLength / Threshold);
 
-        // 使用ParallelFor对当前线段的采样点进行并行检查
+        // 使用 ParallelFor 处理非物理查询部分
         ParallelFor(NumSteps + 1, [&](int32 Step)
             {
                 if (bCollisionDetected.load())
                 {
-                    UE_LOG(LogTemp, Warning, TEXT("Collision Detected"));
                     return;
                 }
 
@@ -655,35 +656,60 @@ bool UMyRRTClass::IsTrajectoryCollisionFree(const TArray<FVector>& Trajectory, c
                     }
                 }
 
-                // 在线程内部创建局部的查询参数
-                FCollisionQueryParams LocalQueryParams;
-                LocalQueryParams.bTraceComplex = true;
-                LocalQueryParams.bReturnPhysicalMaterial = false;
-
-                // 检查与世界中其他障碍物的碰撞
-                FHitResult HitResult;
-                FVector TraceStart = SamplePoint - FVector(1.0f, 1.0f, 1.0f) * Threshold;
-                FVector TraceEnd = SamplePoint + FVector(1.0f, 1.0f, 1.0f) * Threshold;
-                if (World->LineTraceSingleByChannel(HitResult, TraceStart, TraceEnd, ECC_WorldStatic, LocalQueryParams) ||
-                    World->LineTraceSingleByChannel(HitResult, TraceStart, TraceEnd, ECC_WorldDynamic, LocalQueryParams))
+                // 将 SamplePoint 加入待物理查询列表
                 {
-                    bCollisionDetected.store(true);
-                    UE_LOG(LogTemp, Warning, TEXT("Collision with World Static or Dynamic Detected"));
-                    return;
+                    // 使用锁保护对 SamplePoints 的访问
+                    FScopeLock Lock(&SamplePointsMutex);
+                    SamplePoints.Add(SamplePoint);
                 }
             });
 
+        // 如果在并行过程中检测到圆柱体碰撞，则提前退出
         if (bCollisionDetected.load())
         {
-            UE_LOG(LogTemp, Warning, TEXT("Some Kind of Collision Detected"));
+            UE_LOG(LogTemp, Warning, TEXT("Collision detected during parallel processing."));
+            return false;
+        }
+
+        // 在主线程进行物理查询检测
+        for (const FVector& SamplePoint : SamplePoints)
+        {
+            // 如果已经检测到碰撞，跳出循环
+            if (bCollisionDetected.load())
+            {
+                break;
+            }
+
+            FHitResult HitResult;
+            FVector TraceStart = SamplePoint - FVector(1.0f, 1.0f, 1.0f) * Threshold;
+            FVector TraceEnd = SamplePoint + FVector(1.0f, 1.0f, 1.0f) * Threshold;
+
+            FCollisionQueryParams LocalQueryParams;
+            LocalQueryParams.bTraceComplex = true;
+            LocalQueryParams.bReturnPhysicalMaterial = false;
+
+            if (World->LineTraceSingleByChannel(HitResult, TraceStart, TraceEnd, ECC_WorldStatic, LocalQueryParams) ||
+                World->LineTraceSingleByChannel(HitResult, TraceStart, TraceEnd, ECC_WorldDynamic, LocalQueryParams))
+            {
+                bCollisionDetected.store(true);
+                UE_LOG(LogTemp, Warning, TEXT("Collision with World detected at point: %s"), *SamplePoint.ToString());
+                break;
+            }
+        }
+
+        // 清空 SamplePoints，为下一个轨迹段做准备
+        SamplePoints.Reset();
+
+        if (bCollisionDetected.load())
+        {
+            UE_LOG(LogTemp, Warning, TEXT("Some kind of collision detected."));
             return false;
         }
     }
 
-    //UE_LOG(LogTemp, Warning, TEXT("bCollisionDetected.load(): %s"), bCollisionDetected.load() ? TEXT("true") : TEXT("false"));
-
     return !bCollisionDetected.load();
 }
+
 
 //TArray<FVector> UMyRRTClass::SmoothAndValidatePath(const TArray<FVector>& Path, const TArray<FCylindricalInterestPoint>& Obstacles, int32 MaxRetries)
 //{
