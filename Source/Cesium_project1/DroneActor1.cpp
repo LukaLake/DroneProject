@@ -56,6 +56,7 @@ ADroneActor1::ADroneActor1()
 	bIsShowDebugPoints = false;
 	bIsShowGlobalPath = true;
 	bIsShowLocalOriginalPath = false;
+	bIsSavePhotos = false;
 
 	SpeedMultiplier = 10.0f;
 
@@ -443,7 +444,10 @@ void ADroneActor1::StartNewPathPoint ()
 
 	TotalRotationDuration = GlobalFlightDurations[currentIndex];
 
-	//OnCaptureScreenshotWithUI(false); // 如果需要截图
+	if (bIsSavePhotos)
+	{
+		OnCaptureScreenshotWithUI(false); // 如果需要截图
+	}
 
 	// 可以根据需要添加调试信息
 	/*
@@ -2162,7 +2166,7 @@ void ADroneActor1::SmoothGlobalPathPoints_PositionOrientation(int32 Iterations /
 
 		for (int32 i = 1; i < GlobalPathPoints.Num() - 1; ++i)
 		{
-			// 1) 平滑位置
+			// 平滑位置
 			const FVector& PrevPos = TempArray[i - 1].Point;
 			const FVector& CurrPos = TempArray[i].Point;
 			const FVector& NextPos = TempArray[i + 1].Point;
@@ -2177,15 +2181,36 @@ void ADroneActor1::SmoothGlobalPathPoints_PositionOrientation(int32 Iterations /
 			float YawDiffPrev = FMath::Abs(FRotator::NormalizeAxis(OriCurr.Yaw - OriPrev.Yaw));
 			float YawDiffNext = FMath::Abs(FRotator::NormalizeAxis(OriNext.Yaw - OriCurr.Yaw));
 
-			bool bLargeYawChange = (YawDiffPrev > 60.f) || (YawDiffNext > 60.f); // 阈值可调整
+			bool bLargeYawChange = (YawDiffPrev > 40.f) || (YawDiffNext > 40.f); // 阈值可调整
 
 			if (bLargeYawChange)
 			{
-				// 如果检测到大幅朝向变化，用前后点朝向的插值来平滑当前点朝向
-				FQuat QPrev = GlobalPathPoints[i - 1].Orientation.Quaternion();
-				FQuat QNext = GlobalPathPoints[i + 1].Orientation.Quaternion();
-				FQuat QAvg = FQuat::Slerp(QPrev, QNext, 0.5f);
-				GlobalPathPoints[i].Orientation = QAvg.Rotator();
+				// 定义平滑范围
+				int32 localRadius = 2; // 包括当前点及后续两点
+				TArray<FQuat> QuatsToSmooth;
+
+				for (int32 Offset = -localRadius; Offset <= localRadius; ++Offset)
+				{
+					int32 Index = FMath::Clamp(i + Offset, 0, GlobalPathPoints.Num() - 1);
+					QuatsToSmooth.Add(TempArray[Index].Orientation.Quaternion());
+				}
+
+				// 计算平滑的平均四元数
+				FQuat SmoothedQuat = QuatsToSmooth[0];
+				for (int32 j = 1; j < QuatsToSmooth.Num(); ++j)
+				{
+					SmoothedQuat = FQuat::Slerp(SmoothedQuat, QuatsToSmooth[j], 1.0f / (j + 1));
+				}
+
+				// 将平滑后的四元数应用到范围内的点
+				for (int32 Offset = -localRadius; Offset <= localRadius; ++Offset)
+				{
+					int32 Index = FMath::Clamp(i + Offset, 0, GlobalPathPoints.Num() - 1);
+					GlobalPathPoints[Index].Orientation = SmoothedQuat.Rotator();
+				}
+
+				// 跳过已平滑的范围，避免重复操作
+				i += localRadius;
 			}
 			else
 			{
@@ -2574,7 +2599,7 @@ void ADroneActor1::GenerateOrbitFlightPath_Internal()
 
 	GlobalPathPoints.Append(FinalPath);
 
-	SmoothGlobalPathPoints_PositionOrientation(1);
+	SmoothGlobalPathPoints_PositionOrientation(2);
 
 	// 计算所有速度
 	ComputeSpeedByCurvatureAndViewChange(fMaxFlightSpeed,fMinFlightSpeed);
@@ -4383,23 +4408,23 @@ bool ADroneActor1::IsExitNode(int32 NodeIndex) const
 }
 
 // 定义一个函数，接受一个“当创建完后要执行的回调”
-void RequestCreateRRTClassAsync(TFunction<void(UMyRRTClass*)> OnCreated)
-{
-	// 当前处于异步线程/后台线程里
-	// 切回游戏线程执行真正的 NewObject
-	AsyncTask(ENamedThreads::GameThread, [OnCreated]()
-		{
-			UMyRRTClass* RRTClass = NewObject<UMyRRTClass>();
-			// 进行初始化等操作
-			RRTClass->SetWorld(GEngine->GetWorldFromContextObjectChecked(GWorld));
-
-			// 创建完成后，调用回调，传出指针
-			if (OnCreated)
-			{
-				OnCreated(RRTClass);
-			}
-		});
-}
+//void RequestCreateRRTClassAsync(TFunction<void(UMyRRTClass*)> OnCreated)
+//{
+//	// 当前处于异步线程/后台线程里
+//	// 切回游戏线程执行真正的 NewObject
+//	AsyncTask(ENamedThreads::GameThread, [OnCreated]()
+//		{
+//			UMyRRTClass* RRTClass = NewObject<UMyRRTClass>();
+//			// 进行初始化等操作
+//			RRTClass->SetWorld(GEngine->GetWorldFromContextObjectChecked(GWorld));
+//
+//			// 创建完成后，调用回调，传出指针
+//			if (OnCreated)
+//			{
+//				OnCreated(RRTClass);
+//			}
+//		});
+//}
 
 bool ADroneActor1::BuildAndProcessPathSegment(
 	const FVector& StartPos,
@@ -4407,7 +4432,8 @@ bool ADroneActor1::BuildAndProcessPathSegment(
 	int32 StartRegionIndex,
 	int32 TargetRegionIndex,
 	double& OutCost,
-	TArray<FPathPointWithOrientation>& OutPath
+	TArray<FPathPointWithOrientation>& OutPath,
+	UMyRRTClass* LocalRRTClass
 )
 {
 
@@ -4456,43 +4482,32 @@ bool ADroneActor1::BuildAndProcessPathSegment(
 		NextExtraPoint = NextAreaPath[0].Point + FirstNormal * 100.0f;
 	}
 
-	// 假设这个代码片段在一个异步线程里
-	//AsyncTask(ENamedThreads::GameThread, [this]()
-	//	{
-	//		// 这里的代码就会在GameThread上执行
-	//		UMyRRTClass* RRTClass = NewObject<UMyRRTClass>();
-	//		// 在主线程安全地创建UObject
+	//TFuture<UMyRRTClass*> MyFuture;
+	//{
+	//	// 创建Promise
+	//	TSharedRef<TPromise<UMyRRTClass*>> Promise = MakeShared<TPromise<UMyRRTClass*>>();
+	//	// 拿到对应的Future
+	//	MyFuture = Promise->GetFuture();
 
-	//		// 还可以做后续逻辑，比如
-	//		RRTClass->SetWorld(GetWorld());
-	//	});
+	//	// 在异步线程里发起请求
+	//	AsyncTask(ENamedThreads::GameThread, [Promise]()
+	//		{
+	//			// 切到主线程执行NewObject
+	//			UMyRRTClass* RRTClass = NewObject<UMyRRTClass>();
+	//			RRTClass->SetWorld(GEngine->GetWorldFromContextObjectChecked(GWorld));
 
-	TFuture<UMyRRTClass*> MyFuture;
-	{
-		// 创建Promise
-		TSharedRef<TPromise<UMyRRTClass*>> Promise = MakeShared<TPromise<UMyRRTClass*>>();
-		// 拿到对应的Future
-		MyFuture = Promise->GetFuture();
+	//			// 通知Promise
+	//			Promise->SetValue(RRTClass);
+	//		});
+	//}
 
-		// 在异步线程里发起请求
-		AsyncTask(ENamedThreads::GameThread, [Promise]()
-			{
-				// 切到主线程执行NewObject
-				UMyRRTClass* RRTClass = NewObject<UMyRRTClass>();
-				RRTClass->SetWorld(GEngine->GetWorldFromContextObjectChecked(GWorld));
-
-				// 通知Promise
-				Promise->SetValue(RRTClass);
-			});
-	}
-
-	// 这里还是在当前异步线程
-	// 等待或轮询
-	UMyRRTClass* RRTClass = MyFuture.Get(); // Get()会阻塞直到SetValue被调用
+	//// 这里还是在当前异步线程
+	//// 等待或轮询
+	//UMyRRTClass* RRTClass = MyFuture.Get(); // Get()会阻塞直到SetValue被调用
 	//RRTClass->SetWorld(GetWorld()); // 设置世界 必须！
 
 	TArray<FVector> LocalOptimizedPath;
-	TArray<FPathPointWithOrientation> RRTPath = RRTClass->GenerateAndSmoothRRTPath(
+	TArray<FPathPointWithOrientation> RRTPath = LocalRRTClass->GenerateAndSmoothRRTPath(
 		StartPos,
 		EndPos,
 		InterestPoints,
@@ -4689,11 +4704,12 @@ bool ADroneActor1::BuildLinkRoute(
 	int32 StartRegionIndex,
 	int32 TargetRegionIndex,
 	double& OutCost,
-	TArray<FPathPointWithOrientation>& OutPath
+	TArray<FPathPointWithOrientation>& OutPath,
+	UMyRRTClass* LocalRRTClass
 )
 {
 	// 使用通用逻辑生成路径段并处理
-	return BuildAndProcessPathSegment(StartPos, EndPos, StartRegionIndex, TargetRegionIndex, OutCost, OutPath);
+	return BuildAndProcessPathSegment(StartPos, EndPos, StartRegionIndex, TargetRegionIndex, OutCost, OutPath,LocalRRTClass);
 }
 
 
@@ -4702,12 +4718,13 @@ bool ADroneActor1::BuildStartToRegionRoute(
 	const FVector& EndPos,
 	int32 TargetRegionIndex,
 	double& OutCost,
-	TArray<FPathPointWithOrientation>& OutPath
+	TArray<FPathPointWithOrientation>& OutPath,
+	UMyRRTClass* LocalRRTClass
 )
 {
 	// 使用通用逻辑生成路径段并处理
 	int32 StartRegionIndex = -1; // Start为-1表示没有region
-	return BuildAndProcessPathSegment(StartPos, EndPos, StartRegionIndex, TargetRegionIndex, OutCost, OutPath);
+	return BuildAndProcessPathSegment(StartPos, EndPos, StartRegionIndex, TargetRegionIndex, OutCost, OutPath, LocalRRTClass);
 }
 
 
@@ -4716,14 +4733,15 @@ bool ADroneActor1::BuildRegionToEndRoute(
 	const FVector& EndPos,
 	int32 StartRegionIndex,
 	double& OutCost,
-	TArray<FPathPointWithOrientation>& OutPath
+	TArray<FPathPointWithOrientation>& OutPath,
+	UMyRRTClass* LocalRRTClass
 )
 {
 
 	// 使用通用逻辑生成路径段并处理
 	// 这里TargetRegionIndex = -1 因为是End, StartRegionIndex传递为实际RegionIndex
 	int32 TargetRegionIndex = -1;
-	return BuildAndProcessPathSegment(StartPos, EndPos, StartRegionIndex, TargetRegionIndex, OutCost, OutPath);
+	return BuildAndProcessPathSegment(StartPos, EndPos, StartRegionIndex, TargetRegionIndex, OutCost, OutPath, LocalRRTClass);
 }
 
 
@@ -4783,6 +4801,28 @@ bool ADroneActor1::BuildSTSPCostMatrix(TArray<FDoubleArray>& OutCostMatrix)
 			return (NodeIndex - 2) / 2;
 		};
 
+	TFuture<UMyRRTClass*> MyFuture;
+	{
+		// 创建Promise
+		TSharedRef<TPromise<UMyRRTClass*>> Promise = MakeShared<TPromise<UMyRRTClass*>>();
+		// 拿到对应的Future
+		MyFuture = Promise->GetFuture();
+
+		// 在异步线程里发起请求
+		AsyncTask(ENamedThreads::GameThread, [Promise]()
+			{
+				// 切到主线程执行NewObject
+				UMyRRTClass* RRTClass = NewObject<UMyRRTClass>();
+				RRTClass->SetWorld(GEngine->GetWorldFromContextObjectChecked(GWorld));
+
+				// 通知Promise
+				Promise->SetValue(RRTClass);
+			});
+	}
+
+	// 等待或轮询
+	UMyRRTClass* RRTClass = MyFuture.Get(); // Get()会阻塞直到SetValue被调用
+
 	int Progress = 0;
 	int TotalComputation = NumNodes * NumNodes;
 	// 构建代价矩阵
@@ -4792,12 +4832,15 @@ bool ADroneActor1::BuildSTSPCostMatrix(TArray<FDoubleArray>& OutCostMatrix)
 		{
 			// 在后台线程中直接操作UI不安全，需要切回GameThread
 			float CurrentProgress = (static_cast<float>(Progress) / TotalComputation) * 100.0f;
-			AsyncTask(ENamedThreads::GameThread, [this, CurrentProgress]()
-				{
-					// 在主线程中广播事件，让UI有机会更新进度条
+			int UpdateFrequency = 30; // 每处理100次迭代更新一次
+			if (Progress % UpdateFrequency == 0) {
+				
+				AsyncTask(ENamedThreads::GameThread, [this, CurrentProgress]() {
 					OnPathGenerationProgress.Broadcast(CurrentProgress, TEXT("Building STSP Cost Matrix..."));
-				});
-			UE_LOG(LogTemp, Warning, TEXT("Building STSP Cost Matrix. Progress: %.1f%%"), CurrentProgress);
+					});
+				UE_LOG(LogTemp, Warning, TEXT("Progress: %.1f%%"), CurrentProgress);
+			}
+			//UE_LOG(LogTemp, Warning, TEXT("Building STSP Cost Matrix. Progress: %.1f%%"), CurrentProgress);
 
 			if (i == j)
 			{
@@ -4835,17 +4878,20 @@ bool ADroneActor1::BuildSTSPCostMatrix(TArray<FDoubleArray>& OutCostMatrix)
 				if (RegionFrom == -1 && RegionTo != -1)
 				{
 					// 从 Start 到区域
-					bSuccess = BuildStartToRegionRoute(NodePositions[i], NodePositions[j], RegionTo, LinkCost, LinkPath);
+					bSuccess = BuildStartToRegionRoute(NodePositions[i], NodePositions[j],
+						RegionTo, LinkCost, LinkPath, RRTClass);
 				}
 				else if (RegionTo == -1 && RegionFrom != -1)
 				{
 					// 从区域到 End
-					bSuccess = BuildRegionToEndRoute(NodePositions[i], NodePositions[j], RegionFrom, LinkCost, LinkPath);
+					bSuccess = BuildRegionToEndRoute(NodePositions[i], NodePositions[j],
+						RegionFrom, LinkCost, LinkPath, RRTClass);
 				}
 				else if (RegionFrom != -1 && RegionTo != -1)
 				{
 					// 区域到区域
-					bSuccess = BuildLinkRoute(NodePositions[i], NodePositions[j], RegionFrom, RegionTo, LinkCost, LinkPath);
+					bSuccess = BuildLinkRoute(NodePositions[i], NodePositions[j],
+						RegionFrom, RegionTo, LinkCost, LinkPath, RRTClass);
 				}
 
 				if (bSuccess)

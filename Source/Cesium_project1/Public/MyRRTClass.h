@@ -181,11 +181,10 @@ public:
         const FVector& ExtraEndPoint = FVector::ZeroVector,
         float MinDisBetweenPoints = 500.0f,
         int32 MaxRetries =10,
-        float BaseStepSize = 50.0f,
         float CurvatureFactor =3.0f,
-        float MaxSegmentLength =100.0f,
+        float MaxSegmentLength =200.0f,
         int32 MinPoints =10,
-        double StepSize = 50.0f,
+        double StepSize = 300.0f,
         double NeighborRadius =5000.0f
     );
 

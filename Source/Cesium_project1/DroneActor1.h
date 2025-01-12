@@ -20,6 +20,7 @@
 #include "Public/MyTSPClass.h"
 
 #include "Public/MyUtil.h"
+#include "Public/MyRRTClass.h"
 #include "DroneActor1.generated.h"
 
 // 添加委托声明
@@ -371,7 +372,8 @@ public:
 		int32 StartRegionIndex,
 		int32 TargetRegionIndex,
 		double& OutCost,
-		TArray<FPathPointWithOrientation>& OutPath
+		TArray<FPathPointWithOrientation>& OutPath,
+		UMyRRTClass* LocalRRTClass
 	);
 
 	bool BuildLinkRoute(
@@ -380,7 +382,8 @@ public:
 		int32 StartRegionIndex,
 		int32 TargetRegionIndex,
 		double& OutCost,
-		TArray<FPathPointWithOrientation>& OutPath
+		TArray<FPathPointWithOrientation>& OutPath,
+		UMyRRTClass* LocalRRTClass
 	);
 
 	bool BuildStartToRegionRoute(
@@ -388,7 +391,8 @@ public:
 		const FVector& EndPos,
 		int32 TargetRegionIndex,
 		double& OutCost,
-		TArray<FPathPointWithOrientation>& OutPath
+		TArray<FPathPointWithOrientation>& OutPath,
+		UMyRRTClass* LocalRRTClass
 	);
 
 	bool BuildRegionToEndRoute(
@@ -396,7 +400,8 @@ public:
 		const FVector& EndPos,
 		int32 StartRegionIndex,
 		double& OutCost,
-		TArray<FPathPointWithOrientation>& OutPath
+		TArray<FPathPointWithOrientation>& OutPath,
+		UMyRRTClass* LocalRRTClass
 	);
 
 
@@ -525,6 +530,9 @@ public:
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Flight")
 	bool bIsShowLocalOriginalPath;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Flight")
+	bool bIsSavePhotos;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Flight")
 	float fMinFlightSpeed;

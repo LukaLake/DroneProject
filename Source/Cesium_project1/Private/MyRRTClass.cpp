@@ -655,12 +655,17 @@ bool UMyRRTClass::IsTrajectoryCollisionFree(const TArray<FVector>& Trajectory, c
                     }
                 }
 
+                // 在线程内部创建局部的查询参数
+                FCollisionQueryParams LocalQueryParams;
+                LocalQueryParams.bTraceComplex = true;
+                LocalQueryParams.bReturnPhysicalMaterial = false;
+
                 // 检查与世界中其他障碍物的碰撞
                 FHitResult HitResult;
                 FVector TraceStart = SamplePoint - FVector(1.0f, 1.0f, 1.0f) * Threshold;
                 FVector TraceEnd = SamplePoint + FVector(1.0f, 1.0f, 1.0f) * Threshold;
-                if (World->LineTraceSingleByChannel(HitResult, TraceStart, TraceEnd, ECC_WorldStatic, QueryParams) ||
-                    World->LineTraceSingleByChannel(HitResult, TraceStart, TraceEnd, ECC_WorldDynamic, QueryParams))
+                if (World->LineTraceSingleByChannel(HitResult, TraceStart, TraceEnd, ECC_WorldStatic, LocalQueryParams) ||
+                    World->LineTraceSingleByChannel(HitResult, TraceStart, TraceEnd, ECC_WorldDynamic, LocalQueryParams))
                 {
                     bCollisionDetected.store(true);
                     UE_LOG(LogTemp, Warning, TEXT("Collision with World Static or Dynamic Detected"));
@@ -1232,7 +1237,6 @@ TArray<FPathPointWithOrientation> UMyRRTClass::GenerateAndSmoothRRTPath(
     const FVector& ExtraEndPoint,
     float MinDisBetweenPoints,
     int32 MaxRetries,
-    float BaseStepSize,
     float CurvatureFactor,
     float MaxSegmentLength,
     int32 MinPoints,
