@@ -2622,7 +2622,7 @@ void ADroneActor1::GenerateOrbitFlightPath_Internal()
 
 	GlobalPathPoints.Append(FinalPath);
 
-	SmoothGlobalPathPoints_PositionOrientation(1);
+	SmoothGlobalPathPoints_PositionOrientation(2);
 
 	// 计算所有速度
 	ComputeSpeedByCurvatureAndViewChange(fMaxFlightSpeed,fMinFlightSpeed);
