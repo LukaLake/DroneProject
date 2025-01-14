@@ -14,6 +14,8 @@
 #include "Engine/TextureRenderTarget2D.h"
 #include "Blueprint/UserWidget.h"
 
+#include "HAL/PlatformTime.h"
+
 #include "CesiumRuntime.h"
 #include "CesiumGeoreference.h"
 #include "Cesium3DTileset.h"
@@ -58,7 +60,7 @@ ADroneActor1::ADroneActor1()
 	bIsShowLocalOriginalPath = false;
 	bIsSavePhotos = false;
 
-	SpeedMultiplier = 10.0f;
+	SpeedMultiplier = 30.0f;
 
 	fMinFlightSpeed = 300.0f;
 	fMaxFlightSpeed = 2000.0f;
@@ -2366,6 +2368,10 @@ void ADroneActor1::GenerateOrbitFlightPath_Internal()
 	// 使用互斥锁保护全局变量
 	FScopeLock Lock(&PathMutex);
 
+	TArray<double> TimeArray;
+	double StartTime = FPlatformTime::Seconds();
+	
+
 	// 清空现有的路径点和兴趣区域
 	GlobalPathPoints.Empty();
 	InterestAreas.Empty();
@@ -2592,6 +2598,10 @@ void ADroneActor1::GenerateOrbitFlightPath_Internal()
 			currentInterestArea.PathPoints.Num(), currentAOIIndex);
 	}
 
+	double Time1 = FPlatformTime::Seconds();
+	double TimeElapsed = Time1 - StartTime;
+	TimeArray.Add(TimeElapsed);
+
 	// --------------------------------------------------------------
 	// 处理过渡航线和STSP问题
 	TArray<FDoubleArray> CostMatrix;
@@ -2604,9 +2614,17 @@ void ADroneActor1::GenerateOrbitFlightPath_Internal()
 		UE_LOG(LogTemp, Warning, TEXT("Successfully build cost matrix."));
 	}
 
+	double Time2 = FPlatformTime::Seconds();
+	double TimeElapsed2 = Time2 - Time1;
+	TimeArray.Add(TimeElapsed2);
+
 	UMySTSPClass* STSPSolver = NewObject<UMySTSPClass>();
 	int NumRegions = InterestAreas.Num();
 	TArray<int32> BestOrder = STSPSolver->GeneticAlgorithm(CostMatrix, NumRegions);
+
+	double Time3 = FPlatformTime::Seconds();
+	double TimeElapsed3 = Time3 - Time2;
+	TimeArray.Add(TimeElapsed3);
 
 	// 将数组转换为字符串
 	FString BestOrderString;
@@ -2627,6 +2645,15 @@ void ADroneActor1::GenerateOrbitFlightPath_Internal()
 	// 计算所有速度
 	ComputeSpeedByCurvatureAndViewChange(fMaxFlightSpeed,fMinFlightSpeed);
 	UE_LOG(LogTemp, Warning, TEXT("Successfully compute speed."));
+
+	double Time4 = FPlatformTime::Seconds();
+	double TimeElapsed4 = Time4 - Time3;
+	TimeArray.Add(TimeElapsed4);
+
+	for (int i = 0; i < TimeArray.Num(); i++)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("Phase %d Time: %f"), i, TimeArray[i]);
+	}
 
 	ExportPathPointsToWGS84Txt();
 
@@ -4973,7 +5000,7 @@ bool ADroneActor1::BuildSTSPCostMatrix(TArray<FDoubleArray>& OutCostMatrix)
 		{
 			// 在后台线程中直接操作UI不安全，需要切回GameThread
 			float CurrentProgress = (static_cast<float>(Progress) / TotalComputation) * 100.0f;
-			int UpdateFrequency = 30; // 每处理100次迭代更新一次
+			int UpdateFrequency = 2; // 每处理100次迭代更新一次
 			if (Progress % UpdateFrequency == 0) {
 				
 				AsyncTask(ENamedThreads::GameThread, [this, CurrentProgress]() {

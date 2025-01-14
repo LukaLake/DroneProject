@@ -149,7 +149,7 @@ public:
      * @return 如果轨迹没有与任何障碍物发生碰撞，则返回true；否则返回false。
      */
     UFUNCTION(BlueprintCallable, Category = "RRT")
-    bool IsTrajectoryCollisionFree(const TArray<FVector>& Trajectory, const TArray<FCylindricalInterestPoint>& Obstacles, float Threshold = 0.5f);
+    bool IsTrajectoryCollisionFree(const TArray<FVector>& Trajectory, const TArray<FCylindricalInterestPoint>& Obstacles, float Threshold = 10.0f);
 
     /*UFUNCTION(BlueprintCallable, Category = "RRT")
     TArray<FVector> SmoothAndValidatePath(const TArray<FVector>& Path, const TArray<FCylindricalInterestPoint>& Obstacles, int32 MaxRetries = 20);*/
@@ -184,8 +184,8 @@ public:
         float CurvatureFactor =3.0f,
         float MaxSegmentLength =200.0f,
         int32 MinPoints =10,
-        double StepSize = 200.0f,
-        double NeighborRadius =10000.0f
+        double StepSize = 500.0f,
+        double NeighborRadius =20000.0f
     );
 
     // RRT 算法
@@ -207,9 +207,11 @@ private:
     UPROPERTY()
     TArray<FPathPointWithOrientation> Nodes;
 
-    bool IsInObstacleLocal(const FVector& Point, const TArray<FCylindricalInterestPoint>& Obstacles) const;
+    bool IsInObstacleLocal(const FVector& Point, const TArray<FCylindricalInterestPoint>& Obstacles,
+        float Threshold = 10.0f) const;
     bool LineIntersectsObstacles(const FVector& Start, const FVector& End,
-        const TArray<FCylindricalInterestPoint>& Obstacles) const;
+        const TArray<FCylindricalInterestPoint>& Obstacles,
+        float Threshold = 10.0f) const;
     float ComputeLineObstacleDistance(const FVector& Start, const FVector& End,
         const FCylindricalInterestPoint& Obstacle) const;
 
@@ -219,7 +221,7 @@ private:
     RRTNode* ExtendBiRRTTree(TArray<RRTNode*>& ActiveTree, const FVector& Target,
         double StepSize, const TArray<FCylindricalInterestPoint>& Obstacles, double NeighborRadius);
 
-    TArray<FPathPointWithOrientation> ExtractPath(RRTNode* ForwardNode, RRTNode* BackwardNode, bool bReverse);
+    TArray<FVector> ExtractPath(RRTNode* ForwardNode, RRTNode* BackwardNode, bool bReverse);
     /*void OptimizeTreeConnection(TArray<RRTNode*>& TreeA, TArray<RRTNode*>& TreeB,
         const TArray<FCylindricalInterestPoint>& Obstacles);*/
 };

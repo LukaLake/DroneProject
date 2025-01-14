@@ -1187,7 +1187,7 @@ bool NimaObjectTracker::RunInference(UTextureRenderTarget2D* RenderTarget)
 
                         if (LocalIfSaveImage && LocalScore != 0) {
                             // 选择保存目录：项目的 Saved/CapturedImages 目录
-                            FString SaveDirectory = FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("CapturedImages"));
+                            FString SaveDirectory = FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("OriginalPathViews"));
                             IPlatformFile& PlatformFile = FPlatformFileManager::Get().GetPlatformFile();
 
                             // 检查目录是否存在，如果不存在则创建

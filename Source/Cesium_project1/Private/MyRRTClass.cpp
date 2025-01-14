@@ -702,10 +702,11 @@ bool UMyRRTClass::IsTrajectoryCollisionFree(const TArray<FVector>& Trajectory,
                     FVector TraceEnd = SamplePoint + FVector(1.0f, 1.0f, 1.0f) * Threshold;
 
                     FCollisionQueryParams LocalQueryParams;
-                    if (World->LineTraceSingleByChannel(HitResult, TraceStart, TraceEnd, ECC_Visibility, LocalQueryParams))
+                    float SphereRadius = 200.0f; // 设置球体半径
+                    if (World->SweepSingleByChannel(HitResult, SamplePoint, SamplePoint, FQuat::Identity, ECC_WorldDynamic, FCollisionShape::MakeSphere(SphereRadius), LocalQueryParams))
                     {
                         CollisionDetected = true;
-                        UE_LOG(LogTemp, Warning, TEXT("Collision with World detected at point: %s"), *SamplePoint.ToString());
+                        //UE_LOG(LogTemp, Warning, TEXT("Collision with World detected at point: %s"), *SamplePoint.ToString());
                         break;
                     }
                 }
@@ -714,11 +715,12 @@ bool UMyRRTClass::IsTrajectoryCollisionFree(const TArray<FVector>& Trajectory,
             });
 
         // 在后台线程等待主线程任务完成
-        bCollisionDetected.store(Future.Get());
+		bool bCollisionDetectedInSegment = Future.Get();
+        bCollisionDetected.store(bCollisionDetectedInSegment);
 
         if (bCollisionDetected.load())
         {
-            UE_LOG(LogTemp, Warning, TEXT("Some kind of collision detected."));
+            //UE_LOG(LogTemp, Warning, TEXT("Some kind of collision detected."));
             return false;
         }
     }
@@ -779,6 +781,12 @@ RRTNode* UMyRRTClass::ExtendBiRRTTree(TArray<RRTNode*>& ActiveTree, const FVecto
         return nullptr;
     }
 
+    // 检查 NearestNode 和 NewPoint 之间的路径段是否与障碍物相交
+    if (LineIntersectsObstacles(NearestNode->Point, NewPoint, Obstacles))
+    {
+        return nullptr; // 如果路径段与障碍物相交，拒绝这个新节点
+    }
+
     // 初始化新节点的成本
     double NewCost = NearestNode->Cost + FVector::Distance(NearestNode->Point, NewPoint);
     RRTNode* NewNode = new RRTNode(NewPoint, NearestNode, NewCost);
@@ -820,9 +828,9 @@ RRTNode* UMyRRTClass::ExtendBiRRTTree(TArray<RRTNode*>& ActiveTree, const FVecto
 
 
 
-TArray<FPathPointWithOrientation> UMyRRTClass::ExtractPath(RRTNode* ForwardNode, RRTNode* BackwardNode, bool bReverse)
+TArray<FVector> UMyRRTClass::ExtractPath(RRTNode* ForwardNode, RRTNode* BackwardNode, bool bReverse)
 {
-    TArray<FPathPointWithOrientation> CompletePath;
+    TArray<FVector> CompletePath;
 
     // 1. 从ForwardNode回溯到起点，收集前向路径
     TArray<RRTNode*> ForwardNodes;
@@ -854,7 +862,8 @@ TArray<FPathPointWithOrientation> UMyRRTClass::ExtractPath(RRTNode* ForwardNode,
         WP.CoverageAngle = 0.0f;
         WP.AOIIndex = -1;
         WP.AngleRange = FAngleRange();
-        CompletePath.Add(WP);
+        CompletePath.Add(WP.Point);
+		//DrawDebugSphere(World, WP.Point, 50.0f, 12, FColor::Emerald, true, 5.0f);
     }
 
     // 只有当前向和后向节点不重合时才添加连接点
@@ -871,7 +880,7 @@ TArray<FPathPointWithOrientation> UMyRRTClass::ExtractPath(RRTNode* ForwardNode,
         ConnectionWP.CoverageAngle = 0.0f;
         ConnectionWP.AOIIndex = -1;
         ConnectionWP.AngleRange = FAngleRange();
-        CompletePath.Add(ConnectionWP);
+        CompletePath.Add(ConnectionWP.Point);
     }
 
     // 添加后向路径点（如果需要反转）
@@ -888,7 +897,7 @@ TArray<FPathPointWithOrientation> UMyRRTClass::ExtractPath(RRTNode* ForwardNode,
             WP.CoverageAngle = 0.0f;
             WP.AOIIndex = -1;
             WP.AngleRange = FAngleRange();
-            CompletePath.Add(WP);
+            CompletePath.Add(WP.Point);
         }
     }
     else
@@ -904,7 +913,7 @@ TArray<FPathPointWithOrientation> UMyRRTClass::ExtractPath(RRTNode* ForwardNode,
             WP.CoverageAngle = 0.0f;
             WP.AOIIndex = -1;
             WP.AngleRange = FAngleRange();
-            CompletePath.Add(WP);
+            CompletePath.Add(WP.Point);
         }
     }
 
@@ -912,12 +921,12 @@ TArray<FPathPointWithOrientation> UMyRRTClass::ExtractPath(RRTNode* ForwardNode,
     if (CompletePath.Num() < 2)
     {
         UE_LOG(LogTemp, Warning, TEXT("ExtractPath generated invalid path with less than 2 points"));
-        return TArray<FPathPointWithOrientation>();
+        return TArray<FVector>();
     }
 
     // 验证起点和终点
-    float StartDistance = FVector::Distance(CompletePath[0].Point, ForwardNodes[0]->Point);
-    float EndDistance = FVector::Distance(CompletePath.Last().Point, BackwardNodes.Last()->Point);
+    float StartDistance = FVector::Distance(CompletePath[0], ForwardNodes[0]->Point);
+    float EndDistance = FVector::Distance(CompletePath.Last(), BackwardNodes.Last()->Point);
 
     if (StartDistance > 1.0f || EndDistance > 1.0f)
     {
@@ -928,7 +937,7 @@ TArray<FPathPointWithOrientation> UMyRRTClass::ExtractPath(RRTNode* ForwardNode,
     // 移除可能的重复点
     for (int32 i = CompletePath.Num() - 2; i >= 0; --i)
     {
-        if (FVector::Distance(CompletePath[i].Point, CompletePath[i + 1].Point) < 1.0f)
+        if (FVector::Distance(CompletePath[i], CompletePath[i + 1]) < 1.0f)
         {
             CompletePath.RemoveAt(i);
         }
@@ -939,63 +948,114 @@ TArray<FPathPointWithOrientation> UMyRRTClass::ExtractPath(RRTNode* ForwardNode,
 
 
 bool UMyRRTClass::IsInObstacleLocal(const FVector& Point,
-    const TArray<FCylindricalInterestPoint>& Obstacles) const
+    const TArray<FCylindricalInterestPoint>& Obstacles,
+    float Threshold) const
 {
+    // 检查几何障碍物（圆柱体）
     for (const FCylindricalInterestPoint& Obstacle : Obstacles)
     {
         if (IsPointInCylinder(Point, Obstacle))
         {
-            return true;
+            return true; // 点在圆柱体障碍物内
         }
     }
-    return false;
+
+    // 使用 TWeakObjectPtr 安全地引用 World
+    TWeakObjectPtr<UWorld> WeakWorld = World;
+
+    if (!WeakWorld.IsValid())
+    {
+        UE_LOG(LogTemp, Warning, TEXT("World is invalid"));
+        return false;
+    }
+
+    UWorld* LocalWorld = WeakWorld.Get();
+
+    // 定义 SweepSingleByChannel 的碰撞形状
+    FHitResult HitResult;
+    FVector TraceStart = Point - FVector(1.0f, 1.0f, 1.0f) * Threshold;
+    FVector TraceEnd = Point + FVector(1.0f, 1.0f, 1.0f) * Threshold;
+
+    FCollisionQueryParams QueryParams;
+    QueryParams.bTraceComplex = true; // 检测复杂碰撞对象
+
+    float SphereRadius = 200.0f; // 动态设置球体半径
+
+    // 执行碰撞检测
+    if (LocalWorld->SweepSingleByChannel(
+        HitResult,
+        TraceStart,
+        TraceEnd,
+        FQuat::Identity,       // 没有旋转
+        ECC_WorldDynamic,        // 默认可见性通道
+        FCollisionShape::MakeSphere(SphereRadius), // 定义球体形状
+        QueryParams))
+    {
+        //UE_LOG(LogTemp, Warning, TEXT("Point is within an obstacle detected by SweepSingleByChannel"));
+        return true; // 检测到碰撞
+    }
+
+    return false; // 未检测到碰撞
 }
 
+
 bool UMyRRTClass::LineIntersectsObstacles(const FVector& Start, const FVector& End,
-    const TArray<FCylindricalInterestPoint>& Obstacles) const
+    const TArray<FCylindricalInterestPoint>& Obstacles,
+    float Threshold) const
 {
-    // 首先检查端点
+    // 检查端点是否在障碍物内
     if (IsInObstacleLocal(Start, Obstacles) || IsInObstacleLocal(End, Obstacles))
     {
         return true;
     }
 
-    float LineLength = FVector::Distance(Start, End);
-
-    // 如果线段太短，直接返回false
-    if (LineLength < 1.0f)
+    // 检查线段是否过短
+    if (FVector::Distance(Start, End) < 1.0f)
     {
+        return false; // 线段过短，不可能发生碰撞
+    }
+
+    // 使用 TWeakObjectPtr 安全地引用 World
+    TWeakObjectPtr<UWorld> WeakWorld = World;
+
+    if (!WeakWorld.IsValid())
+    {
+        UE_LOG(LogTemp, Warning, TEXT("World is invalid"));
         return false;
     }
 
-    // 对每个障碍物进行检查
+    UWorld* LocalWorld = WeakWorld.Get();
+
+    // 检查与圆柱体障碍物的碰撞
     for (const FCylindricalInterestPoint& Obstacle : Obstacles)
     {
-        // 计算线段到圆柱体的最短距离
         float MinDist = ComputeLineObstacleDistance(Start, End, Obstacle);
-
-        // 如果距离小于圆柱体半径加上安全距离，认为发生碰撞
-        if (MinDist <= (Obstacle.Radius + Obstacle.MinSafetyDistance))
+        if (MinDist <= (Obstacle.Radius + Threshold))
         {
             return true;
         }
     }
 
-    // 进行离散采样检查
-    int32 NumChecks = FMath::Max(2, FMath::CeilToInt(LineLength / 50.0f));
-    for (int32 i = 1; i < NumChecks - 1; ++i)
-    {
-        float t = static_cast<float>(i) / NumChecks;
-        FVector CheckPoint = FMath::Lerp(Start, End, t);
+    float SphereRadius = 200.0f; // 动态调整球体半径
+    FHitResult HitResult;
+    FCollisionQueryParams LocalQueryParams;
 
-        if (IsInObstacleLocal(CheckPoint, Obstacles))
-        {
-            return true;
-        }
+    if (LocalWorld->SweepSingleByChannel(
+        HitResult,
+        Start,
+        End,
+        FQuat::Identity,
+        ECC_WorldDynamic,
+        FCollisionShape::MakeSphere(SphereRadius),
+        LocalQueryParams))
+    {
+        //UE_LOG(LogTemp, Warning, TEXT("Collision detected at: %s"), *HitResult.ImpactPoint.ToString());
+        return true;
     }
 
     return false;
 }
+
 
 float UMyRRTClass::ComputeLineObstacleDistance(const FVector& Start, const FVector& End,
     const FCylindricalInterestPoint& Obstacle) const
@@ -1301,14 +1361,26 @@ TArray<FPathPointWithOrientation> UMyRRTClass::GenerateAndSmoothRRTPath(
     
     // 设置搜索空间
     FBox BoundingBox(StartLocation, EndLocation);
-    float Expansion = FVector::Distance(BoundingBox.Min, BoundingBox.Max);
+    // 获取长方体的半尺寸
+    FVector BoxExtent = BoundingBox.GetExtent();
+
+    // 定义扩展比例和固定高度扩展值
+    float HorizontalExpansionRatio = 0.2f; // 水平方向扩展比例（X 和 Y）
+    float FixedVerticalExpansion = 2000.0f; // 高度方向固定扩展值
+
+    // 计算水平方向的扩展值
+    FVector Expansion(
+        BoxExtent.X * HorizontalExpansionRatio,
+        BoxExtent.Y * HorizontalExpansionRatio,
+        FixedVerticalExpansion // 高度方向直接使用固定值
+    );
     FVector BoxMin = BoundingBox.Min - FVector(Expansion);
     FVector BoxMax = BoundingBox.Max + FVector(Expansion);
     FBox SearchSpace(BoxMin, BoxMax);
 
-    int32 MaxIterations = FMath::Max(10 * FVector::Distance(StartLocation, EndLocation), 5000);
+    int32 MaxIterations = FMath::Max(10 * FVector::Distance(StartLocation, EndLocation), 50000);
     float GoalBias = 0.2f;
-    double ConnectThreshold = StepSize * 2.0;
+    double ConnectThreshold = StepSize * 0.1;
 
     RRTNode* ConnectingForwardNode = nullptr;
     RRTNode* ConnectingBackwardNode = nullptr;
@@ -1381,7 +1453,12 @@ TArray<FPathPointWithOrientation> UMyRRTClass::GenerateAndSmoothRRTPath(
     }
 
     // 提取路径
-    TArray<FPathPointWithOrientation> Path = ExtractPath(ConnectingForwardNode, ConnectingBackwardNode, true);
+    TArray<FVector> Path = ExtractPath(ConnectingForwardNode, ConnectingBackwardNode, true);
+
+    if (!IsTrajectoryCollisionFree(Path, InterestPoints))
+    {
+		UE_LOG(LogTemp, Error, TEXT("BiRRT path contains collisions!"));
+    }
 
     // 路径平滑
 	// 也利用额外点进行平滑
@@ -1392,7 +1469,7 @@ TArray<FPathPointWithOrientation> UMyRRTClass::GenerateAndSmoothRRTPath(
 		RawVectorPath.Add(StartLocation);
 		for (const auto& Node : Path)
 		{
-			RawVectorPath.Add(Node.Point);
+			RawVectorPath.Add(Node);
 		}
 		RawVectorPath.Add(EndLocation);
 	}
@@ -1401,7 +1478,7 @@ TArray<FPathPointWithOrientation> UMyRRTClass::GenerateAndSmoothRRTPath(
 		RawVectorPath.Reserve(Path.Num() );
 		for (const auto& Node : Path)
 		{
-			RawVectorPath.Add(Node.Point);
+			RawVectorPath.Add(Node);
 		}
 	}
 
