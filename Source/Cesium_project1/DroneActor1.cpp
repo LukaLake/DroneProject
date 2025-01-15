@@ -1953,8 +1953,11 @@ void ADroneActor1::SmoothSegmentSpeed(int32 Iterations)
 
 void ADroneActor1::ExportPathPointsToWGS84Txt()
 {
-
-	FString SaveFilePath = FPaths::ProjectDir() + TEXT("Path.txt");
+	// 使用时间命名文件
+	FString TimeString = FDateTime::Now().ToString();
+	TimeString = TimeString.Replace(TEXT(":"), TEXT("-"));
+	TimeString = TimeString.Replace(TEXT(" "), TEXT("_"));
+	FString SaveFilePath = FPaths::ProjectDir() + TEXT("Path_") + TimeString + TEXT(".txt");
 
 	if (!CesiumGeoreference)
 	{
@@ -2691,17 +2694,21 @@ FPathPointWithOrientation ADroneActor1::TestGenerateCandidateViewpoints(
 	const FCylindricalInterestPoint& CurrentAOI = InterestPoints[CurrentAOIIndex];
 	FVector TargetWorldLocation = CurrentAOI.Center;
 
+	DrawDebugSphere(GetWorld(), TargetWorldLocation, 50.0f, 8, FColor::Blue, true, 0.1f, 0, 2.0f);
+
 	// 定义理想位置
 	TArray<TPair<FVector2D, FString>> IdealPositions = {
 		{FVector2D(0.0f, 0.0f), TEXT("Center")},
-		{FVector2D(-0.33f, 0.33f), TEXT("TopLeft")},
-		{FVector2D(0.33f, 0.33f), TEXT("TopRight")},
-		{FVector2D(-0.33f, -0.33f), TEXT("BottomLeft")},
-		{FVector2D(0.33f, -0.33f), TEXT("BottomRight")} // 格式是X,Y
+		{FVector2D(-0.167f, 0.167f), TEXT("TopLeft")},
+		{FVector2D(0.167f, 0.167f), TEXT("TopRight")},
+		{FVector2D(-0.167f, -0.167f), TEXT("BottomLeft")},
+		{FVector2D(0.167f, -0.167f), TEXT("BottomRight")} // 格式是X,Y
 	};
 
 	// 定义焦距
 	const float FocalLength = 1.0f / FMath::Tan(FMath::DegreesToRadians(CameraComponent->FieldOfView / 2.0f));
+	const float AspectRatio = CameraComponent->AspectRatio;
+	UE_LOG(LogTemp, Warning, TEXT("FocalLength: %f, AspectRatio: %f"), FocalLength, AspectRatio);
 
 	// 生成候选视点
 	for (const auto& IdealPos : IdealPositions)
@@ -2719,8 +2726,8 @@ FPathPointWithOrientation ADroneActor1::TestGenerateCandidateViewpoints(
 
 		// 计算 Pitch 和 Yaw 的偏移
 		// 加上负号就正确了
-		float PitchOffset = - FMath::RadiansToDegrees(FMath::Atan2(IdealPos.Key.Y, FocalLength));
-		float YawOffset = - FMath::RadiansToDegrees(FMath::Atan2(IdealPos.Key.X, FocalLength));
+		double PitchOffset = - FMath::RadiansToDegrees(FMath::Atan2(IdealPos.Key.Y, FocalLength));
+		double YawOffset = - FMath::RadiansToDegrees(FMath::Atan2(IdealPos.Key.X* AspectRatio, FocalLength));
 
 		// 更新目标旋转角度
 		Candidate.TargetRotation = BaseRotation + FRotator(PitchOffset, YawOffset, 0.0f);
@@ -2742,7 +2749,17 @@ FPathPointWithOrientation ADroneActor1::TestGenerateCandidateViewpoints(
 		viewCandidate.Point = Candidate.Location;
 		viewCandidate.Orientation = Candidate.TargetRotation;
 		viewCandidate.FOV = Candidate.FOV;
+		viewCandidate.SegmentSpeed = 10.0f;
 
+		// 将兴趣区域中心投影到屏幕空间
+		FVector2D ScreenPosition;
+		bool bProjected = ProjectWorldPointToScreen(TargetWorldLocation, ScreenPosition, viewCandidate.Point, viewCandidate.Orientation, PathPoint.FOV);
+
+		if (bProjected)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("Projected screen position: %s"), *ScreenPosition.ToString());
+		}
+		
 		GlobalPathPoints.Add(viewCandidate);
 	}
 
@@ -2804,23 +2821,44 @@ void ADroneActor1::OnTestGenerateCandidateViewpoints()
 		// 生成候选视点
 		FPathPointWithOrientation BestViewpoint = TestGenerateCandidateViewpoints(RandomPathPoint);
 
+		for (int32 i = 0; i < GlobalPathPoints.Num(); ++i)
+		{
+			const FPathPointWithOrientation& PathPoint = GlobalPathPoints[i];
+			FVector OrientationEnd = PathPoint.Point + PathPoint.Orientation.Vector() * 50.0f;
+			DrawDebugLine(GetWorld(), PathPoint.Point, OrientationEnd, FColor::Red, true, 0.1f, 0, 0.5f);
+		}
+
 		//GlobalPathPoints.Add(BestViewpoint);
-		bShouldDrawPathPoints = true;
+		//bShouldDrawPathPoints = true;
 		fGenerationFinished = true;
 
 	}
 	else {
 		bIsSlowMove = false;
-		bShouldDrawPathPoints = false;
-		fGenerationFinished = false;
+		/*bShouldDrawPathPoints = false;
+		fGenerationFinished = false;*/
+		FlushPersistentDebugLines(GetWorld());
+
+		for (int32 i = 0; i < GlobalPathPoints.Num(); ++i)
+		{
+			const FPathPointWithOrientation& PathPoint = GlobalPathPoints[i];
+			// 绘制航点位置的小圆球
+			DrawDebugSphere(GetWorld(), PathPoint.Point, 50.0f, 8, FColor::Blue, true, 0.1f, 0, 2.0f);
+
+			// 绘制相机朝向的线
+			FVector OrientationEnd = PathPoint.Point + PathPoint.Orientation.Vector() * 50.0f;
+			DrawDebugLine(GetWorld(), PathPoint.Point, OrientationEnd, FColor::Red, true, 0.1f, 0, 2.0f);
+			//SplineComponent->AddSplinePoint(PathPoint.Point, ESplineCoordinateSpace::World);
+		}
+		
 		// 清空兴趣点和路径点
-		InterestPoints.Empty();
+		/*InterestPoints.Empty();
 		GlobalPathPoints.Empty();
-		DestroyPathPoints();
+		DestroyPathPoints();*/
 
 		currentIndex = 0;
 
-		GEngine->AddOnScreenDebugMessage(-1, 5.f, FColor::Yellow, TEXT("Stop drawing path points"));
+		//GEngine->AddOnScreenDebugMessage(-1, 5.f, FColor::Yellow, TEXT("Stop drawing path points"));
 	}
 	
 }
@@ -2846,14 +2884,15 @@ FPathPointWithOrientation ADroneActor1::GenerateCandidateViewpoints(
 	// 定义理想位置
 	TArray<TPair<FVector2D, FString>> IdealPositions = {
 		{FVector2D(0.0f, 0.0f), TEXT("Center")},
-		{FVector2D(-0.33f, 0.33f), TEXT("TopLeft")},
-		{FVector2D(0.33f, 0.33f), TEXT("TopRight")},
-		{FVector2D(-0.33f, -0.33f), TEXT("BottomLeft")},
-		{FVector2D(0.33f, -0.33f), TEXT("BottomRight")} // 格式是X,Y
+		{FVector2D(-0.167f, 0.167f), TEXT("TopLeft")},
+		{FVector2D(0.167f, 0.167f), TEXT("TopRight")},
+		{FVector2D(-0.167f, -0.167f), TEXT("BottomLeft")},
+		{FVector2D(0.167f, -0.167f), TEXT("BottomRight")} // 格式是X,Y
 	};
 
 	// 定义焦距
 	const float FocalLength = 1.0f / FMath::Tan(FMath::DegreesToRadians(CameraComponent->FieldOfView/ 2.0f));
+	const float AspectRatio = CameraComponent->AspectRatio;
 
 	// 生成候选视点
 	for (const auto& IdealPos : IdealPositions)
@@ -2870,7 +2909,7 @@ FPathPointWithOrientation ADroneActor1::GenerateCandidateViewpoints(
 
 		// 计算 Pitch 和 Yaw 的偏移
 		float PitchOffset = - FMath::RadiansToDegrees(FMath::Atan2(IdealPos.Key.Y, FocalLength));
-		float YawOffset = - FMath::RadiansToDegrees(FMath::Atan2(IdealPos.Key.X, FocalLength));
+		float YawOffset = - FMath::RadiansToDegrees(FMath::Atan2(IdealPos.Key.X*AspectRatio, FocalLength));
 
 		// 更新目标旋转角度
 		Candidate.TargetRotation = BaseRotation + FRotator(PitchOffset, YawOffset, 0.0f);
@@ -3812,14 +3851,14 @@ bool ADroneActor1::IsCoverageSatisfied(const TArray<FPathPointWithOrientation>& 
 		if (DoesViewpointSeeTopAndBottom(Viewpoint, TargetInterestPoint))
 		{
 			VerticalCoverageCount++;
-			if (VerticalCoverageCount >= 2)
+			if (VerticalCoverageCount >= 1)
 			{
 				break;
 			}
 		}
 
 	}
-	bool bVerticalCoverageSatisfied = (VerticalCoverageCount >= 2);
+	bool bVerticalCoverageSatisfied = (VerticalCoverageCount >= 1);
 
 	return bHorizontalCoverageSatisfied && bVerticalCoverageSatisfied;
 
@@ -3832,7 +3871,7 @@ bool ADroneActor1::IsDistanceSatisfied(const TArray<FPathPointWithOrientation>& 
 	float MinSafetyDistance = InterestPoints[0].MinSafetyDistance;
 
 	// 计算最小距离阈值
-	float MinDistanceThreshold = InterestRadius + MinSafetyDistance;
+	float MinDistanceThreshold = InterestRadius;
 
 	// 检查每对视点之间的距离是否大于等于最小距离阈值
 	for (int32 i = 0; i < ViewpointGroup.Num() - 1; ++i)
@@ -4368,12 +4407,13 @@ FRotator ADroneActor1::CalculateOrientationFromScreenPosition(
 {
 	// 定义焦距
 	const float FocalLength = 1.0f / FMath::Tan(FMath::DegreesToRadians(FOV / 2.0f));
+	const float AspectRatio = CameraComponent->AspectRatio;
 	FVector Direction = AOILocation - CameraLocation;
 	FRotator _BaseRotation = Direction.Rotation();
 
 	// 计算 Pitch 和 Yaw 的偏移
 	float PitchOffset = -FMath::RadiansToDegrees(FMath::Atan2(ScreenPosition.Y, FocalLength));
-	float YawOffset = -FMath::RadiansToDegrees(FMath::Atan2(ScreenPosition.X, FocalLength));
+	float YawOffset = -FMath::RadiansToDegrees(FMath::Atan2(ScreenPosition.X* AspectRatio, FocalLength));
 	FRotator _TargetRotation = _BaseRotation + FRotator(PitchOffset, YawOffset, 0.0f);
 
 	return _TargetRotation;
@@ -5440,27 +5480,51 @@ void ADroneActor1::OnStartFlightAlongPath()
 
 
 void ADroneActor1::OnReadPathFromFile() {
-	FString SaveFilePath = FPaths::ProjectDir() + TEXT("Path.txt");
+	// 获取项目目录
+	FString ProjectDir = FPaths::ProjectDir();
+
+	// 查找所有符合命名规则的文件
+	TArray<FString> FoundFiles;
+	IFileManager::Get().FindFiles(FoundFiles, *(ProjectDir + TEXT("Path_*.txt")), true, false);
+
+	if (FoundFiles.Num() == 0)
+	{
+		GEngine->AddOnScreenDebugMessage(-1, 5.f, FColor::Red, TEXT("No path files found!"));
+		return;
+	}
+
+	// 按修改时间排序文件
+	FoundFiles.Sort([&](const FString& A, const FString& B) {
+		FDateTime TimeA = IFileManager::Get().GetTimeStamp(*(ProjectDir + A));
+		FDateTime TimeB = IFileManager::Get().GetTimeStamp(*(ProjectDir + B));
+		return TimeA > TimeB; // 降序排列，最近的文件在前
+		});
+
+	// 获取最近的文件路径
+	FString MostRecentFilePath = ProjectDir + FoundFiles[0];
+
+	// 检查文件是否存在
+	if (!FPaths::FileExists(MostRecentFilePath))
+	{
+		GEngine->AddOnScreenDebugMessage(-1, 5.f, FColor::Red, TEXT("Most recent path file not found!"));
+		return;
+	}
+
 	if (bIsGeneratingPath)
 	{
 		UE_LOG(LogTemp, Warning, TEXT("Path generation already in progress"));
 		return;
 	}
 
-	if (FPaths::FileExists(SaveFilePath))
-	{
-		// 读取路径点
-		ImportPathPointsFromTxt(SaveFilePath);
+	// 读取路径点
+	ImportPathPointsFromTxt(MostRecentFilePath);
 
-		// 启用路径点绘制
-		bShouldDrawPathPoints = true;
-		fGenerationFinished = true;
-	}
-	else
-	{
-		GEngine->AddOnScreenDebugMessage(-1, 5.f, FColor::Red, TEXT("Path file not found!"));
-	}
-	
+	// 启用路径点绘制
+	bShouldDrawPathPoints = true;
+	fGenerationFinished = true;
+
+	// 显示成功消息
+	GEngine->AddOnScreenDebugMessage(-1, 5.f, FColor::Green, FString::Printf(TEXT("Loaded most recent path file: %s"), *MostRecentFilePath));
 }
 
 

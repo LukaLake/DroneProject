@@ -639,7 +639,7 @@ private: // 权重参数
 	const float QualityCostWeight = 1.0f;
 	const float SmoothnessCostWeight = 0.8f;
 
-	const float AestheticScoreThreshold = 4.4f;
+	const float AestheticScoreThreshold = 4.2f;
 	const float MaxAestheticScore = 10.0f;
 
 	const float DroneRadius = 30.0f;

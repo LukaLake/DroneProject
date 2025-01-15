@@ -1179,7 +1179,7 @@ bool NimaObjectTracker::RunInference(UTextureRenderTarget2D* RenderTarget)
                         ModelHelperPtr->bIsRunning = false;
 
                         if (LocalIfSaveImage) {
-                            UE_LOG(LogTemp, Log, TEXT("SaveImage is true with score: %f"), LocalScore);
+                            //UE_LOG(LogTemp, Log, TEXT("SaveImage is true with score: %f"), LocalScore);
                         }
                         else {
                             //UE_LOG(LogTemp, Log, TEXT("SaveImage is false with score: %f"), LocalScore);
@@ -1236,7 +1236,7 @@ bool NimaObjectTracker::RunInference(UTextureRenderTarget2D* RenderTarget)
                             }
                             else
                             {
-                                UE_LOG(LogTemp, Log, TEXT("Successfully saved captured image to %s"), *FullPath);
+                                //UE_LOG(LogTemp, Log, TEXT("Successfully saved captured image to %s"), *FullPath);
                             }
                         }
                     });
