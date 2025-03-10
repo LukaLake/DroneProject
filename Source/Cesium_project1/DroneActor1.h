@@ -215,6 +215,8 @@ public:
 	// 计算路径长度
 	float CalculatePathLength(const TArray<FPathPointWithOrientation>& PathPoints);
 
+	
+	bool AdjustPathPointForObstacles(FPathPointWithOrientation& PathPoint, const FCylindricalInterestPoint& InterestPoint);
 
 	// 计算视点覆盖角度
 	bool IsAngleVisible_KeepNegativeAngles(
@@ -344,6 +346,10 @@ public:
 
 	// 碰撞检测
 	bool IsPathCollisionFree(const TArray<FPathPointWithOrientation>& Path);
+
+	bool IsPositionSafe(const FVector& Position, float SafetyRadius,
+		const TArray<FCylindricalInterestPoint>& AllInterestPoints,
+		int32 CurrentAOIIndex);
 
 	// 路径长度代价
 	float CalculateLengthCost(const TArray<FPathPointWithOrientation>& Path, float MaxLength);

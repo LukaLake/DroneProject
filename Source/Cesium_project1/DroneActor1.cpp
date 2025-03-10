@@ -3090,6 +3090,107 @@ float ADroneActor1::CalculatePathLength(const TArray<FPathPointWithOrientation>&
 	return TotalLength;
 }
 
+bool ADroneActor1::AdjustPathPointForObstacles(FPathPointWithOrientation& PathPoint, const FCylindricalInterestPoint& InterestPoint)
+{
+	const float DetectionRadius = 800.0f;
+	const float MinSafeDistance = 300.0f;
+
+	TArray<FHitResult> HitResults;
+	FCollisionQueryParams QueryParams;
+	QueryParams.AddIgnoredActor(this);
+
+	bool bObstaclesDetected = GetWorld()->SweepMultiByChannel(
+		HitResults,
+		PathPoint.Point,
+		PathPoint.Point + FVector(0.1f, 0, 0),
+		FQuat::Identity,
+		ECC_WorldStatic,
+		FCollisionShape::MakeSphere(DetectionRadius),
+		QueryParams
+	);
+
+	if (!bObstaclesDetected || HitResults.Num() == 0)
+	{
+		return false; // 无需调整
+	}
+
+	// 找出最近的障碍物
+	float ClosestDistance = DetectionRadius;
+	FVector ClosestObstaclePoint = PathPoint.Point;
+	bool bNeedsAdjustment = false;
+
+	for (const FHitResult& Hit : HitResults)
+	{
+		if (Hit.GetActor() && Hit.GetActor() != this)
+		{
+			float Distance = FVector::Dist(PathPoint.Point, Hit.ImpactPoint);
+			if (Distance < ClosestDistance)
+			{
+				ClosestDistance = Distance;
+				ClosestObstaclePoint = Hit.ImpactPoint;
+				bNeedsAdjustment = true;
+			}
+		}
+	}
+
+	// 如果距离已经安全，则无需调整
+	if (!bNeedsAdjustment || ClosestDistance >= MinSafeDistance)
+	{
+		return false;
+	}
+
+	// 计算从障碍物到兴趣点中心的径向方向
+	FVector ObstacleToCenter = InterestPoint.Center - ClosestObstaclePoint;
+	ObstacleToCenter.Z = 0; // 忽略高度
+
+	if (ObstacleToCenter.IsNearlyZero())
+	{
+		// 如果障碍物在中心附近，则简单地远离障碍物
+		FVector DirectionAwayFromObstacle = (PathPoint.Point - ClosestObstaclePoint).GetSafeNormal();
+		float AdjustmentAmount = MinSafeDistance - ClosestDistance;
+		PathPoint.Point += DirectionAwayFromObstacle * AdjustmentAmount;
+	}
+	else
+	{
+		// 正常的径向收缩
+		ObstacleToCenter.Normalize();
+
+		// 计算收缩因子（越近收缩越多）
+		float AdjustmentFactor = FMath::Clamp(1.0f - (ClosestDistance / MinSafeDistance), 0.0f, 0.8f);
+		float RadialAdjustment = (MinSafeDistance - ClosestDistance) * (1.0f + AdjustmentFactor);
+
+		// 计算当前点到中心的径向距离
+		FVector CenterToPoint = PathPoint.Point - InterestPoint.Center;
+		CenterToPoint.Z = 0;
+		float CurrentRadius = CenterToPoint.Size();
+
+		// 计算新的径向距离（确保不会太靠近兴趣点）
+		float NewRadius = FMath::Max(CurrentRadius - RadialAdjustment, InterestPoint.Radius + 50.0f);
+
+		if (!CenterToPoint.IsNearlyZero())
+		{
+			// 保持径向方向，收缩距离
+			FVector Direction = CenterToPoint.GetSafeNormal();
+			FVector NewPosition = InterestPoint.Center + Direction * NewRadius;
+			NewPosition.Z = PathPoint.Point.Z; // 保持高度
+
+			PathPoint.Point = NewPosition;
+		}
+	}
+
+	// 重新计算朝向
+	PathPoint.Orientation = FRotationMatrix::MakeFromX(InterestPoint.Center - PathPoint.Point).Rotator();
+
+	// 调整FOV
+	float FOVIncrease = FMath::Lerp(0.0f, 30.0f, FMath::Clamp(1.0f - (ClosestDistance / MinSafeDistance), 0.0f, 1.0f));
+	PathPoint.FOV = FMath::Clamp(PathPoint.FOV + FOVIncrease, 60.0f, 120.0f);
+
+	UE_LOG(LogTemp, Log, TEXT("Path point adjusted: Obstacle distance: %.2f, New FOV: %.2f"),
+		ClosestDistance, PathPoint.FOV);
+
+	return true;
+}
+
 
 bool ADroneActor1::IsAngleVisible_KeepNegativeAngles(
 	const FPathPointWithOrientation& Viewpoint,
@@ -4419,6 +4520,74 @@ FRotator ADroneActor1::CalculateOrientationFromScreenPosition(
 	return _TargetRotation;
 }
 
+
+bool ADroneActor1::IsPositionSafe(const FVector& Position, float SafetyRadius,
+	const TArray<FCylindricalInterestPoint>& AllInterestPoints,
+	int32 CurrentAOIIndex)
+{
+	// 检查位置是否在其他兴趣区域内（除了当前正在处理的区域）
+	for (int32 i = 0; i < AllInterestPoints.Num(); ++i)
+	{
+		if (i == CurrentAOIIndex)
+		{
+			continue; // 跳过当前处理的兴趣区域
+		}
+
+		const FCylindricalInterestPoint& OtherAOI = AllInterestPoints[i];
+
+		// 检查水平距离
+		FVector Pos2D(Position.X, Position.Y, 0);
+		FVector Center2D(OtherAOI.Center.X, OtherAOI.Center.Y, 0);
+		float HorizontalDist = FVector::Dist(Pos2D, Center2D);
+
+		// 检查垂直位置
+		float BottomZ = OtherAOI.BottomCenter.Z;
+		float TopZ = BottomZ + OtherAOI.Height;
+
+		// 如果点在其他兴趣区域的圆柱体内
+		if (HorizontalDist <= (OtherAOI.Radius + OtherAOI.MinSafetyDistance) &&
+			Position.Z >= BottomZ && Position.Z <= TopZ)
+		{
+			return false; // 不安全
+		}
+	}
+
+	// 使用扫描检测其他障碍物
+	TArray<FHitResult> HitResults;
+	FCollisionQueryParams QueryParams;
+	QueryParams.AddIgnoredActor(this);
+
+	bool bObstaclesDetected = GetWorld()->SweepMultiByChannel(
+		HitResults,
+		Position,
+		Position + FVector(0.1f, 0, 0), // 微小偏移
+		FQuat::Identity,
+		ECC_WorldStatic,
+		FCollisionShape::MakeSphere(SafetyRadius),
+		QueryParams
+	);
+
+	if (!bObstaclesDetected || HitResults.Num() == 0)
+	{
+		return true; // 安全
+	}
+
+	// 进一步检查是否为真实障碍物（排除特定类型的对象）
+	for (const FHitResult& Hit : HitResults)
+	{
+		if (Hit.GetActor() && Hit.GetActor() != this)
+		{
+			// 可以在这里添加额外的过滤逻辑
+			// 例如忽略一些特定标签的对象
+			if (!Hit.GetActor()->ActorHasTag(TEXT("IgnoreForPathFinding")))
+			{
+				return false; // 不安全
+			}
+		}
+	}
+
+	return true; // 安全
+}
 
 
 bool ADroneActor1::IsPathCollisionFree(const TArray<FPathPointWithOrientation>& Path)
