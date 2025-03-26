@@ -3090,103 +3090,202 @@ float ADroneActor1::CalculatePathLength(const TArray<FPathPointWithOrientation>&
 	return TotalLength;
 }
 
-bool ADroneActor1::AdjustPathPointForObstacles(FPathPointWithOrientation& PathPoint, const FCylindricalInterestPoint& InterestPoint)
-{
-	const float DetectionRadius = 800.0f;
-	const float MinSafeDistance = 300.0f;
 
+
+// 获取给定位置到最近障碍物的距离
+// @param Position 无人机当前位置
+// @param AllInterestPoints 所有感兴趣点的数组
+// @param CurrentAOIIndex 当前感兴趣区域的索引
+// @return 返回给定位置到最近障碍物的距离
+float ADroneActor1::GetClosestObstacleDistance(const FVector& Position,
+	const TArray<FCylindricalInterestPoint>& AllInterestPoints,
+	int32 CurrentAOIIndex,float DetectionRadius=1000.0f)
+{
+	float ClosestDistance = TNumericLimits<float>::Max();
+
+	// 检查其他兴趣区域
+	for (int32 i = 0; i < AllInterestPoints.Num(); ++i)
+	{
+		if (i == CurrentAOIIndex)
+		{
+			continue; // 跳过当前区域
+		}
+
+		const FCylindricalInterestPoint& OtherAOI = AllInterestPoints[i];
+
+		// 计算水平距离
+		FVector Pos2D(Position.X, Position.Y, 0);
+		FVector Center2D(OtherAOI.Center.X, OtherAOI.Center.Y, 0);
+		float HorizontalDist = FVector::Dist(Pos2D, Center2D) - OtherAOI.Radius;
+
+		// 检查垂直位置
+		float BottomZ = OtherAOI.BottomCenter.Z;
+		float TopZ = BottomZ + OtherAOI.Height;
+
+		// 如果在圆柱体高度范围内，考虑水平距离
+		if (Position.Z >= BottomZ && Position.Z <= TopZ)
+		{
+			ClosestDistance = FMath::Min(ClosestDistance, HorizontalDist);
+		}
+	}
+
+	// 检查其他障碍物
 	TArray<FHitResult> HitResults;
 	FCollisionQueryParams QueryParams;
 	QueryParams.AddIgnoredActor(this);
 
 	bool bObstaclesDetected = GetWorld()->SweepMultiByChannel(
 		HitResults,
-		PathPoint.Point,
-		PathPoint.Point + FVector(0.1f, 0, 0),
+		Position,
+		Position + FVector(0.1f, 0, 0),
 		FQuat::Identity,
 		ECC_WorldStatic,
-		FCollisionShape::MakeSphere(DetectionRadius),
+		FCollisionShape::MakeSphere(DetectionRadius), // 使用较大半径
 		QueryParams
 	);
 
-	if (!bObstaclesDetected || HitResults.Num() == 0)
+	if (bObstaclesDetected && HitResults.Num() > 0)
 	{
-		return false; // 无需调整
-	}
-
-	// 找出最近的障碍物
-	float ClosestDistance = DetectionRadius;
-	FVector ClosestObstaclePoint = PathPoint.Point;
-	bool bNeedsAdjustment = false;
-
-	for (const FHitResult& Hit : HitResults)
-	{
-		if (Hit.GetActor() && Hit.GetActor() != this)
+		for (const FHitResult& Hit : HitResults)
 		{
-			float Distance = FVector::Dist(PathPoint.Point, Hit.ImpactPoint);
-			if (Distance < ClosestDistance)
+			if (Hit.GetActor() && Hit.GetActor() != this)
 			{
-				ClosestDistance = Distance;
-				ClosestObstaclePoint = Hit.ImpactPoint;
-				bNeedsAdjustment = true;
+				float Distance = FVector::Dist(Position, Hit.ImpactPoint);
+				ClosestDistance = FMath::Min(ClosestDistance, Distance);
 			}
 		}
 	}
 
-	// 如果距离已经安全，则无需调整
-	if (!bNeedsAdjustment || ClosestDistance >= MinSafeDistance)
+	return ClosestDistance;
+}
+
+
+
+bool ADroneActor1::AdjustPathPointForObstacles(FPathPointWithOrientation& PathPoint, const FCylindricalInterestPoint& InterestPoint)
+{
+	// 检测参数
+	const float DetectionRadius = 800.0f;
+	const float MinSafeDistance = 300.0f;
+	const float InitialAdjustmentStep = 50.0f;
+	const int MaxAdjustmentIterations = 10;
+
+	// 获取原始位置和FOV
+	FVector OriginalPosition = PathPoint.Point;
+	float OriginalFOV = PathPoint.FOV;
+
+	// 计算点到兴趣区域中心的径向向量
+	FVector CenterToPoint = OriginalPosition - InterestPoint.Center;
+	CenterToPoint.Z = 0; // 忽略高度
+	float OriginalRadius = CenterToPoint.Size();
+	FVector RadialDirection = CenterToPoint.GetSafeNormal();
+
+	// 检查原始位置安全性
+	float ClosestDistance = GetClosestObstacleDistance(OriginalPosition, InterestPoints, PathPoint.AOIIndex, DetectionRadius);
+
+	// 如果原位置已经安全，无需调整
+	if (ClosestDistance >= MinSafeDistance)
 	{
 		return false;
 	}
 
-	// 计算从障碍物到兴趣点中心的径向方向
-	FVector ObstacleToCenter = InterestPoint.Center - ClosestObstaclePoint;
-	ObstacleToCenter.Z = 0; // 忽略高度
+	// 渐进式收缩调整
+	FVector CurrentPosition = OriginalPosition;
+	float CurrentFOV = OriginalFOV;
+	float CurrentRadius = OriginalRadius;
 
-	if (ObstacleToCenter.IsNearlyZero())
+	// 保存最佳调整结果
+	FVector BestPosition = CurrentPosition;
+	float BestFOV = CurrentFOV;
+	float BestDistance = ClosestDistance;
+	bool bFoundSafePosition = false;
+
+	// 迭代收缩，逐步寻找安全位置
+	for (int Iteration = 0; Iteration < MaxAdjustmentIterations; ++Iteration)
 	{
-		// 如果障碍物在中心附近，则简单地远离障碍物
-		FVector DirectionAwayFromObstacle = (PathPoint.Point - ClosestObstaclePoint).GetSafeNormal();
-		float AdjustmentAmount = MinSafeDistance - ClosestDistance;
-		PathPoint.Point += DirectionAwayFromObstacle * AdjustmentAmount;
-	}
-	else
-	{
-		// 正常的径向收缩
-		ObstacleToCenter.Normalize();
+		// 计算当前收缩百分比
+		float AdjustmentProgress = static_cast<float>(Iteration) / MaxAdjustmentIterations;
 
-		// 计算收缩因子（越近收缩越多）
-		float AdjustmentFactor = FMath::Clamp(1.0f - (ClosestDistance / MinSafeDistance), 0.0f, 0.8f);
-		float RadialAdjustment = (MinSafeDistance - ClosestDistance) * (1.0f + AdjustmentFactor);
+		// 计算当前步长和收缩方向
+		float CurrentStep = InitialAdjustmentStep * (1.0f - AdjustmentProgress * 0.5f);
 
-		// 计算当前点到中心的径向距离
-		FVector CenterToPoint = PathPoint.Point - InterestPoint.Center;
-		CenterToPoint.Z = 0;
-		float CurrentRadius = CenterToPoint.Size();
+		// 收缩当前半径
+		CurrentRadius -= CurrentStep;
 
-		// 计算新的径向距离（确保不会太靠近兴趣点）
-		float NewRadius = FMath::Max(CurrentRadius - RadialAdjustment, InterestPoint.Radius + 50.0f);
-
-		if (!CenterToPoint.IsNearlyZero())
+		// 确保不会太靠近兴趣区域
+		float MinAllowedRadius = InterestPoint.Radius + InterestPoint.MinSafetyDistance;
+		if (CurrentRadius < MinAllowedRadius)
 		{
-			// 保持径向方向，收缩距离
-			FVector Direction = CenterToPoint.GetSafeNormal();
-			FVector NewPosition = InterestPoint.Center + Direction * NewRadius;
-			NewPosition.Z = PathPoint.Point.Z; // 保持高度
+			CurrentRadius = MinAllowedRadius;
+			if (Iteration > 0) break;
+		}
 
-			PathPoint.Point = NewPosition;
+		// 更新位置
+		CurrentPosition = InterestPoint.Center + RadialDirection * CurrentRadius;
+		CurrentPosition.Z = OriginalPosition.Z; // 保持高度不变
+
+		// 根据收缩程度调整FOV
+		float RadiusRatio = CurrentRadius / OriginalRadius;
+		// 使用反比例关系：半径减少30%，FOV增加30%
+		float FOVScaleFactor = FMath::Min(1.0f / RadiusRatio, 1.8f); // 最多增加80%
+		CurrentFOV = OriginalFOV * FOVScaleFactor;
+		CurrentFOV = FMath::Clamp(CurrentFOV, 60.0f, 120.0f);
+
+		// 检查新位置安全性
+		float CurrentSafetyDistance = GetClosestObstacleDistance(CurrentPosition, InterestPoints, PathPoint.AOIIndex);
+
+		// 如果找到安全位置，终止搜索
+		if (CurrentSafetyDistance >= MinSafeDistance)
+		{
+			bFoundSafePosition = true;
+			BestPosition = CurrentPosition;
+			BestFOV = CurrentFOV;
+			BestDistance = CurrentSafetyDistance;
+			break;
+		}
+
+		// 如果新位置比之前更安全，则更新最佳位置
+		if (CurrentSafetyDistance > BestDistance)
+		{
+			BestPosition = CurrentPosition;
+			BestFOV = CurrentFOV;
+			BestDistance = CurrentSafetyDistance;
 		}
 	}
 
-	// 重新计算朝向
-	PathPoint.Orientation = FRotationMatrix::MakeFromX(InterestPoint.Center - PathPoint.Point).Rotator();
+	// 如果没有找到完全安全的位置，但有改进，使用最佳位置
+	if (!bFoundSafePosition && BestDistance <= ClosestDistance)
+	{
+		// 无法找到更安全的位置，尝试调整高度
+		float HeightAdjustment = 100.0f; // 尝试向上或向下调整1米
 
-	// 调整FOV
-	float FOVIncrease = FMath::Lerp(0.0f, 30.0f, FMath::Clamp(1.0f - (ClosestDistance / MinSafeDistance), 0.0f, 1.0f));
-	PathPoint.FOV = FMath::Clamp(PathPoint.FOV + FOVIncrease, 60.0f, 120.0f);
+		// 尝试向上调整
+		FVector UpPosition = BestPosition + FVector(0, 0, HeightAdjustment);
+		float UpDistance = GetClosestObstacleDistance(UpPosition, InterestPoints, PathPoint.AOIIndex);
 
-	UE_LOG(LogTemp, Log, TEXT("Path point adjusted: Obstacle distance: %.2f, New FOV: %.2f"),
-		ClosestDistance, PathPoint.FOV);
+		// 尝试向下调整
+		FVector DownPosition = BestPosition - FVector(0, 0, HeightAdjustment);
+		float DownDistance = GetClosestObstacleDistance(DownPosition, InterestPoints, PathPoint.AOIIndex);
+
+		// 选择最安全的高度
+		if (UpDistance > BestDistance && UpDistance > DownDistance)
+		{
+			BestPosition = UpPosition;
+			BestDistance = UpDistance;
+		}
+		else if (DownDistance > BestDistance)
+		{
+			BestPosition = DownPosition;
+			BestDistance = DownDistance;
+		}
+	}
+
+	// 更新路径点
+	PathPoint.Point = BestPosition;
+	PathPoint.FOV = BestFOV;
+	PathPoint.Orientation = FRotationMatrix::MakeFromX(InterestPoint.Center - BestPosition).Rotator();
+
+	/*UE_LOG(LogTemp, Log, TEXT("Path adjusted: R: %.2f->%.2f, Dist: %.2f->%.2f, FOV: %.2f->%.2f"),
+		OriginalRadius, (BestPosition - InterestPoint.Center).Size(), ClosestDistance, BestDistance, OriginalFOV, BestFOV);*/
 
 	return true;
 }
@@ -3584,7 +3683,6 @@ void ADroneActor1::SelectBestViewpointGroups(
 		{
 			FPlatformProcess::Sleep(0.001f);
 		}
-
 	}
 
 	// 等待所有异步任务完成
@@ -3601,8 +3699,40 @@ void ADroneActor1::SelectBestViewpointGroups(
 	// 筛选美学评分高于阈值的视点
 	// 以及视点是否看到了兴趣点的顶部
 	TArray<FPathPointWithOrientation> FilteredViewpoints;
-	for (const FPathPointWithOrientation& Viewpoint : ScoredViewpoints)
+	for ( FPathPointWithOrientation& Viewpoint : ScoredViewpoints)
 	{
+		// 获取对应的兴趣区域
+		const FCylindricalInterestPoint& AOI = InterestPoints[Viewpoint.AOIIndex];
+
+		// 在调整点的位置和 FOV 后，需要重新计算美学评分
+		if (AdjustPathPointForObstacles(Viewpoint, AOI))
+		{
+			Viewpoint.AestheticScore = -1; // 重置美学评分
+			AsyncTask(ENamedThreads::GameThread, [this, &Viewpoint, &TaskCounter]()
+				{
+					// 在游戏线程上调用渲染函数
+					RenderViewpointToRenderTarget(Viewpoint);
+					// 在游戏线程上运行推理任务
+					if (NimaTracker && RenderTarget)
+					{
+						NimaTracker->RunInference(RenderTarget);
+					}
+					// 等待异步推理完成,直到获取到有效的美学评分
+					while (NimaTracker->GetNimaScore() <= 0)
+					{
+						FPlatformProcess::Sleep(0.001f);
+					}
+					Viewpoint.AestheticScore = NimaTracker->GetNimaScore();
+					NimaTracker->ResetNimaScore(); // 重置美学评分
+					// 计算覆盖角度
+					Viewpoint.CoverageAngle = CalculateViewpointCoverage(Viewpoint, InterestPoints[Viewpoint.AOIIndex]);
+				});
+			while (Viewpoint.AestheticScore <= 0)
+			{
+				FPlatformProcess::Sleep(0.001f);
+			}
+		}
+
 		if (Viewpoint.AestheticScore >= AestheticScoreThreshold&&DoesViewpointSeeTop(Viewpoint, InterestPoints[Viewpoint.AOIIndex]))
 		{
 			FilteredViewpoints.Add(Viewpoint);

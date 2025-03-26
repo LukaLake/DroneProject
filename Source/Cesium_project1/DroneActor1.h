@@ -215,7 +215,9 @@ public:
 	// 计算路径长度
 	float CalculatePathLength(const TArray<FPathPointWithOrientation>& PathPoints);
 
-	
+	float GetClosestObstacleDistance(const FVector& Position,
+		const TArray<FCylindricalInterestPoint>& AllInterestPoints,
+		int32 CurrentAOIIndex, float DetectionRadius);
 	bool AdjustPathPointForObstacles(FPathPointWithOrientation& PathPoint, const FCylindricalInterestPoint& InterestPoint);
 
 	// 计算视点覆盖角度
