@@ -1,27 +1,37 @@
 // Fill out your copyright notice in the Description page of Project Settings.
 
-#include "DroneActor1.h"
-#include <string>
+// 标准库头文件放在最前面
 #include <algorithm>
-#include "HighResScreenshot.h"
-#include "Misc/DateTime.h"
+#include <string>
+
+// CoreMinimal 等核心头文件
+#include "DroneActor1.h"
+
+// 引擎核心功能头文件分组
+#include "HAL/PlatformTime.h"
 #include "ImageUtils.h"
+#include "Kismet/GameplayStatics.h"
+#include "Misc/DateTime.h"
+
+// 渲染相关头文件分组
+#include "HighResScreenshot.h"
 #include "Rendering/RenderingCommon.h"
 #include "RenderingThread.h"
-#include "Kismet/GameplayStatics.h"
 
-#include <Engine/SceneCapture2D.h>
-#include "Engine/TextureRenderTarget2D.h"
+// UI及组件头文件分组
 #include "Blueprint/UserWidget.h"
+#include "Engine/SceneCapture2D.h"
+#include "Engine/TextureRenderTarget2D.h"
+#include "Math/Quat.h"
 
-#include "HAL/PlatformTime.h"
-
-#include "CesiumRuntime.h"
-#include "CesiumGeoreference.h"
+// Cesium相关头文件分组
 #include "Cesium3DTileset.h"
+#include "CesiumGeoreference.h"
+#include "CesiumRuntime.h"
 
-
+// 项目相关头文件分组
 #include "Public/MyRRTClass.h"
+#include "Public/MyTSPClass.h"                   // 如果需要
 
 
 
@@ -85,7 +95,7 @@ ADroneActor1::ADroneActor1()
 	// 初始化起点和终点
 	StartLocation = FVector(0, 0, 0);
 	EndLocation = FVector(0, 0, 0);
-	
+
 
 	// 初始化鼠标灵敏度
 	MouseSensitivity = 1.0f;
@@ -199,7 +209,7 @@ void ADroneActor1::BeginPlay()
 			SceneCaptureComponent->PostProcessSettings.bOverride_MotionBlurAmount = true;
 			SceneCaptureComponent->PostProcessSettings.MotionBlurAmount = 0.0f;
 			SceneCaptureComponent->PostProcessBlendWeight = 1.0f; // 完全应用后处理效果
-			
+
 			/*SceneCaptureComponent->bOverride_CustomNearClippingPlane = CameraComponent->bUseCustomNearClippingPlane;
 			SceneCaptureComponent->CustomNearClippingPlane = CameraComponent->CustomNearClippingPlane;*/
 
@@ -214,7 +224,7 @@ void ADroneActor1::BeginPlay()
 		}
 	}
 
-	
+
 	if (GlobeAnchorComponent)
 	{
 		GlobeAnchorComponent->SetAdjustOrientationForGlobeWhenMoving(true);
@@ -404,7 +414,7 @@ void ADroneActor1::PrecomputeAllDuration()
 }
 
 
-void ADroneActor1::StartNewPathPoint ()
+void ADroneActor1::StartNewPathPoint()
 {
 	CurrentRotationTime = 0.0f;
 
@@ -435,7 +445,7 @@ void ADroneActor1::StartNewPathPoint ()
 		SegmentSpeed = GlobalPathPoints[currentIndex].SegmentSpeed;
 	}
 	else {
-		SegmentSpeed = GlobalPathPoints[currentIndex-1].SegmentSpeed; // 否则使用出发点的速度
+		SegmentSpeed = GlobalPathPoints[currentIndex - 1].SegmentSpeed; // 否则使用出发点的速度
 	}
 	CurrentSpeed = SegmentSpeed; // 设置当前速度
 
@@ -446,7 +456,7 @@ void ADroneActor1::StartNewPathPoint ()
 	//{
 	//	AvgSpeed = 1.0f;
 	//}
-	
+
 	//float MoveDuration = DistanceToTarget / SegmentSpeed;
 
 	//// 根据是否慢速模式，决定最终旋转时长
@@ -464,12 +474,18 @@ void ADroneActor1::StartNewPathPoint ()
 
 	TotalRotationDuration = GlobalFlightDurations[currentIndex];
 
-	if (bIsSavePhotos)
+	// 截图功能改为定时执行，避免每个路径点都立即截图
+	if (bIsSavePhotos && !bScreenshotInProgress)
 	{
-		OnCaptureScreenshotWithUI(false); // 如果需要截图
+		bScreenshotInProgress = true;
+		GetWorld()->GetTimerManager().SetTimer(
+			ScreenshotTimerHandle,
+			FTimerDelegate::CreateUObject(this, &ADroneActor1::OnCaptureScreenshotWithUI, false),
+			ScreenshotCooldown,
+			false);
 	}
 
-	// 可以根据需要添加调试信息
+	// 调试信息
 	/*
 	UE_LOG(LogTemp, Warning, TEXT("Start Rotation: %s, Target Rotation: %s"), *StartRotation.ToString(), *TargetRotation.ToString());
 	UE_LOG(LogTemp, Warning, TEXT("Yaw Diff: %f, Pitch Diff: %f, Max Angle Diff: %f, Total Rotation Duration: %f"),
@@ -576,7 +592,7 @@ void ADroneActor1::DrawDebugHelpers(bool bIfShowDebugAreas)
 void ADroneActor1::ShowPathPoints()
 {
 
-	if ( GlobalPathPoints.Num() > 0&& bIsShowGlobalPath)
+	if (GlobalPathPoints.Num() > 0 && bIsShowGlobalPath)
 	{
 		// 清除 SplineComponent 的现有控制点
 		SplineComponent->ClearSplinePoints();
@@ -590,7 +606,7 @@ void ADroneActor1::ShowPathPoints()
 			// 绘制相机朝向的线
 			FVector OrientationEnd = PathPoint.Point + PathPoint.Orientation.Vector() * 50.0f;
 			DrawDebugLine(GetWorld(), PathPoint.Point, OrientationEnd, FColor::Red, true, 0.1f, 0, 2.0f);
-			
+
 			// 绘制航线（连接当前点和下一个点）
 			if (i < GlobalPathPoints.Num() - 1)
 			{
@@ -600,7 +616,7 @@ void ADroneActor1::ShowPathPoints()
 
 			//SplineComponent->AddSplinePoint(PathPoint.Point, ESplineCoordinateSpace::World);
 		}
-		
+
 		//// 更新 SplineComponent 的曲线
 		//SplineComponent->UpdateSpline();	
 
@@ -687,7 +703,7 @@ void ADroneActor1::Tick(float DeltaTime)
 
 	if (PlayerController != nullptr)
 	{
-		 // 匹配 FOV
+		// 匹配 FOV
 		float MainCameraFOV = PlayerController->PlayerCameraManager->GetFOVAngle();
 		SceneCaptureComponent->FOVAngle = MainCameraFOV;
 
@@ -720,12 +736,35 @@ void ADroneActor1::Tick(float DeltaTime)
 		float ReachThreshold = DistancePerFrame * 0.5f;
 
 		//--------------------------------------------------------------------------
-		// 1）平滑旋转
+		// 1）平滑旋转 - 优化处理极端俯仰角
 		//--------------------------------------------------------------------------
 		CurrentRotationTime += DeltaTime;
 		float Alpha = FMath::Clamp(CurrentRotationTime / TotalRotationDuration, 0.0f, 1.0f);
 
-		
+		FQuat StartQuat = StartRotation.Quaternion();
+		FQuat TargetQuat = TargetPathPoint.Orientation.Quaternion();
+
+		// 检查并确保使用正确的四元数表示（同一半球）
+		if ((StartQuat | TargetQuat) < 0.0f)
+		{
+			TargetQuat = -TargetQuat; // 反转四元数以确保最短路径
+		}
+
+		// 使用改进的插值方法，处理极端情况下的旋转
+		FQuat NewQuat = FQuat::Slerp(StartQuat, TargetQuat, Alpha);
+		NewQuat.Normalize(); // 确保归一化
+
+		// 使用三分量插值作为备选方案（处理俯仰角极端情况）
+		if (FMath::Abs(StartRotation.Pitch) > 80.0f || FMath::Abs(TargetPathPoint.Orientation.Pitch) > 80.0f)
+		{
+			// 分别对各个欧拉角分量进行插值
+			float NewPitch = FMath::Lerp(StartRotation.Pitch, TargetPathPoint.Orientation.Pitch, Alpha);
+			float NewYaw = StartRotation.Yaw + FMath::FindDeltaAngleDegrees(StartRotation.Yaw, TargetPathPoint.Orientation.Yaw) * Alpha;
+			float NewRoll = FMath::Lerp(StartRotation.Roll, TargetPathPoint.Orientation.Roll, Alpha);
+
+			FRotator ComponentWiseRotation(NewPitch, NewYaw, NewRoll);
+			NewQuat = ComponentWiseRotation.Quaternion();
+		}
 
 		//--------------------------------------------------------------------------
 		// 2）平滑 FOV
@@ -743,17 +782,20 @@ void ADroneActor1::Tick(float DeltaTime)
 
 		bool bRotationFinished = true;
 		if (bIsSlowMove) {
-			bRotationFinished = (abs(CurrentRotationTime - TotalRotationDuration) <= 0.01f) ? true : false;	// 仅当慢速移动的时候考虑这一项
+			bRotationFinished = (abs(CurrentRotationTime - TotalRotationDuration) <= 0.01f) ? true : false;
 		}
 
-		if (DistanceRemaining <= ReachThreshold&& bRotationFinished)
+		if (DistanceRemaining <= ReachThreshold && bRotationFinished)
 		{
-			// 直接设置为目标点
+			// 到达目标点直接设置精确值
 			SetActorLocation(TargetLocation);
 			SetActorRotation(TargetPathPoint.Orientation);
+			if (PlayerController != nullptr)
+			{
+				PlayerController->SetControlRotation(TargetPathPoint.Orientation);
+			}
 			CameraComponent->SetFieldOfView(TargetPathPoint.FOV);
 
-			// OnCaptureScreenshotWithUI();	// 如果需要截图
 			// 切换到下一个目标点
 			if (currentIndex + 1 < GlobalPathPoints.Num())
 			{
@@ -764,16 +806,12 @@ void ADroneActor1::Tick(float DeltaTime)
 			{
 				bIsFlyingAlongPath = false;
 				GEngine->AddOnScreenDebugMessage(-1, 5.f, FColor::Green, TEXT("Reached final path point."));
-				//bShouldDrawPathPoints = true;
+				bShouldDrawPathPoints = true;
 			}
 		}
 		else
 		{
 			// 正常移动
-			FQuat StartQuat = StartRotation.Quaternion();
-			FQuat TargetQuat = TargetPathPoint.Orientation.Quaternion();
-			FQuat NewQuat = FQuat::Slerp(StartQuat, TargetQuat, Alpha);
-
 			SetActorRotation(NewQuat);
 			if (PlayerController != nullptr)
 			{
@@ -784,6 +822,7 @@ void ADroneActor1::Tick(float DeltaTime)
 			SetActorLocation(NewLocation);
 		}
 	}
+
 
 
 	/*UE_LOG(LogTemp, Warning, TEXT("IsTracking: %s"), YoloTracker->IsTracking() ? TEXT("True") : TEXT("False"));
@@ -851,6 +890,9 @@ void ADroneActor1::SetupPlayerInputComponent(UInputComponent* PlayerInputCompone
 
 	PlayerInputComponent->BindAction("Track_Yolo", IE_Pressed, this, &ADroneActor1::OnStartTracking);
 
+	// 添加传统环绕路径生成按键
+	PlayerInputComponent->BindAction("GenerateTraditionalOrbit", IE_Pressed, this, &ADroneActor1::OnGenerateTraditionalOrbit);
+
 	PlayerInputComponent->BindAction("StartGeneratePath", IE_Pressed, this, &ADroneActor1::OnGenerateOrbitFlightPath);
 	PlayerInputComponent->BindAction("Inference_Relic", IE_Pressed, this, &ADroneActor1::OnPredictAction);
 
@@ -864,7 +906,7 @@ void ADroneActor1::SetupPlayerInputComponent(UInputComponent* PlayerInputCompone
 	CaptureWithUIBinding.ActionDelegate.GetDelegateForManualSet().BindLambda([this]()
 		{
 			// 在这里传参数
-			OnCaptureScreenshotWithUI(true);
+			OnCaptureScreenshotWithUI(false);
 		});
 
 	// 3) 把这个 Binding 加进 PlayerInputComponent
@@ -931,7 +973,7 @@ void ADroneActor1::OnRightMouseReleased()
 		CurrentState = EInterestPointState::Idle; // 重置状态
 		if (InterestPoints.Num() == 0) {
 			FlushPersistentDebugLines(GetWorld());
-		}	
+		}
 	}
 
 	bUseControllerRotationYaw = false;
@@ -1019,7 +1061,7 @@ void ADroneActor1::AdjustFlySpeed(float AxisValue)
 			// 调整 SpeedMultiplier，并限制其范围
 			SpeedMultiplier = FMath::Clamp(SpeedMultiplier + AxisValue * 1.0f, 0.1f, 5000.0f);
 			UE_LOG(LogTemp, Log, TEXT("Current SpeedMultiplier: %f"), SpeedMultiplier);
-		}	
+		}
 	}
 }
 
@@ -1103,6 +1145,331 @@ void ADroneActor1::OnPredictAction()
 	//    // ...
 	//}
 }
+
+
+// 根据半径计算合适的环绕点数
+int32 ADroneActor1::CalculatePointsForOrbitRadius(float _Radius)
+{
+	// 基础点数 - 确保最少有8个点以维持基本的环绕路径形状
+	const int32 BasePointCount = 8;
+
+	// 根据半径动态调整点数
+	// 半径越大，周长越长，需要更多的点来保持平滑度
+	float RadiusFactor = _Radius / 500.0f; // 以500为基准单位
+	int32 AdditionalPoints = FMath::FloorToInt(RadiusFactor * 8.0f); // 每500单位增加8个点
+
+	// 设置上限，避免点数过多影响性能
+	const int32 MaxPointCount = 32;
+
+	return FMath::Clamp(BasePointCount + AdditionalPoints, BasePointCount, MaxPointCount);
+}
+
+// 根据距离和高度调整FOV
+void ADroneActor1::AdjustFOVBasedOnDistanceAndHeight(FPathPointWithOrientation& PathPoint,
+	const FCylindricalInterestPoint& InterestPoint,
+	float _Radius, float HeightOffset)
+{
+	// 默认FOV
+	float DefaultFOV = CameraComponent->FieldOfView;
+
+	// 计算当前点与兴趣点中心的水平距离和高度差
+	float HeightDifference = FMath::Abs(PathPoint.Point.Z - InterestPoint.Center.Z);
+
+	// 根据距离和高度调整FOV
+	// 1. 距离越远，FOV应该越小（放大）以保持目标大小
+	float DistanceFactor = 1.0f + (_Radius - InterestPoint.Radius - InterestPoint.MinSafetyDistance) / 1000.0f;
+	DistanceFactor = FMath::Clamp(DistanceFactor, 0.8f, 1.2f); // 限制FOV变化范围
+
+	// 2. 高度差越大，FOV应该略微增加以捕获更多场景
+	float HeightFactor = 1.0f + (HeightDifference / InterestPoint.Height) * 0.2f;
+	HeightFactor = FMath::Clamp(HeightFactor, 1.0f, 1.2f);
+
+	// 计算最终FOV，应用因子
+	float AdjustedFOV = DefaultFOV * (DistanceFactor / HeightFactor);
+
+	// 确保FOV在合理范围内
+	PathPoint.FOV = FMath::Clamp(AdjustedFOV, 45.0f, 110.0f);
+}
+
+
+// 保持原GenerateTraditionalOrbitPath作为公共API，但将实际实现移至_Internal方法
+void ADroneActor1::GenerateTraditionalOrbitPath_Internal()
+{
+	// 清空现有路径点
+	FScopeLock Lock(&PathMutex); // 使用互斥锁保护全局变量
+	GlobalPathPoints.Empty();
+
+	// 确保至少有一个兴趣区域
+	if (InterestPoints.Num() == 0)
+	{
+		AsyncTask(ENamedThreads::GameThread, [this]() {
+			GEngine->AddOnScreenDebugMessage(-1, 5.f, FColor::Red, TEXT("请先选择至少一个兴趣区域！"));
+			OnPathGenerationComplete.Broadcast(false);
+			});
+		return;
+	}
+
+	// 报告初始进度
+	AsyncTask(ENamedThreads::GameThread, [this]() {
+		OnPathGenerationProgress.Broadcast(0.0f, TEXT("开始生成智能环绕路径..."));
+		});
+
+	// 处理每个兴趣区域
+	for (int32 AOIIndex = 0; AOIIndex < InterestPoints.Num(); ++AOIIndex)
+	{
+		// 更新进度
+		float _ProgressPercent = (static_cast<float>(AOIIndex) / InterestPoints.Num()) * 20.0f;
+		AsyncTask(ENamedThreads::GameThread, [this, _ProgressPercent, AOIIndex]() {
+			OnPathGenerationProgress.Broadcast(
+				_ProgressPercent,
+				FString::Printf(TEXT("处理兴趣区域 %d/%d..."), AOIIndex + 1, InterestPoints.Num())
+			);
+			});
+
+		// 获取当前兴趣区域
+		const FCylindricalInterestPoint& InterestPoint = InterestPoints[AOIIndex];
+
+		// 明确单位定义
+		const float MeterToUnrealUnit = 100.0f;  // 1米 = 100虚幻单位(厘米)
+
+		// 计算视场角（FOV）和纵横比
+		const float CameraFOV = CameraComponent->FieldOfView;
+
+		// 使用精确的轨道参数计算
+		float OrbitRadius, OrbitRadius1, OrbitRadius2, MinHeight, MaxHeight;
+		CalculateOrbitParameters(InterestPoint, OrbitRadius, OrbitRadius1, OrbitRadius2, MinHeight, MaxHeight);
+
+		// 使用单一基准半径，后续会根据障碍物调整
+		float BaseRadius = OrbitRadius;
+
+		// 螺旋路径参数设置
+		const float HeightPerTurn = 800.0f;  // 每圈旋转时的高度增量(厘米) = 8米
+		float TotalHeight = MaxHeight - MinHeight;
+		int32 NumTurns = FMath::CeilToInt(TotalHeight / HeightPerTurn);
+		float TotalAngle = 360.0f * NumTurns;
+		float HeightIncrement = TotalHeight / TotalAngle;
+
+		// 报告配置完成
+		AsyncTask(ENamedThreads::GameThread, [this]() {
+			OnPathGenerationProgress.Broadcast(20.0f, TEXT("配置参数完成，开始生成路径点..."));
+			});
+
+		// 生成点集
+		TArray<FPathPointWithOrientation> CandidatePoints;
+
+		// 为单一半径计算合适的点数
+		int32 PointsPerCircle = CalculatePointsForOrbitRadius(BaseRadius);
+		float AngleIncrementD = 360.0f / PointsPerCircle;
+
+		// 生成螺旋路径 - 使用连续的螺旋线而不是多个圆圈
+		float CurrentAngle = 0.0f;
+		float CurrentHeight = MinHeight;
+
+		while (CurrentHeight < MaxHeight)
+		{
+			// 更新进度
+			float ProgressPercent = 20.0f + (CurrentHeight - MinHeight) / TotalHeight * 40.0f;
+			AsyncTask(ENamedThreads::GameThread, [this, ProgressPercent]() {
+				OnPathGenerationProgress.Broadcast(
+					ProgressPercent,
+					TEXT("生成螺旋路径点...")
+				);
+				});
+
+			// 计算当前点的位置
+			FVector Position(
+				InterestPoint.Center.X + BaseRadius * FMath::Cos(FMath::DegreesToRadians(CurrentAngle)),
+				InterestPoint.Center.Y + BaseRadius * FMath::Sin(FMath::DegreesToRadians(CurrentAngle)),
+				CurrentHeight
+			);
+
+			// 朝向始终指向兴趣点中心
+			FVector DirectionToCenter = InterestPoint.Center - Position;
+			FRotator Orientation = DirectionToCenter.Rotation();
+
+			// 创建路径点
+			FPathPointWithOrientation PathPoint;
+			PathPoint.Point = Position;
+			PathPoint.Orientation = Orientation;
+			PathPoint.FOV = CameraFOV;  // 初始使用相机默认FOV
+			PathPoint.AOIIndex = AOIIndex;
+
+			// 根据距离和高度动态调整视场角
+			AdjustFOVBasedOnDistanceAndHeight(PathPoint, InterestPoint, BaseRadius, CurrentHeight - InterestPoint.BottomCenter.Z);
+
+			// 检查并调整路径点，避开障碍物
+			AdjustPathPointForObstacles(PathPoint, InterestPoint);
+
+			// 添加到候选点
+			CandidatePoints.Add(PathPoint);
+
+			// 递增角度和高度
+			CurrentAngle += AngleIncrementD;
+			CurrentHeight += HeightIncrement * AngleIncrementD;
+		}
+
+		// 报告点生成完成，开始美学评分
+		AsyncTask(ENamedThreads::GameThread, [this]() {
+			OnPathGenerationProgress.Broadcast(60.0f, TEXT("路径点生成完成，开始计算美学评分..."));
+			});
+
+		// 异步计算美学评分和覆盖度
+		if (NimaTracker)
+		{
+			Force3DTilesLoad(); // 强制加载3D Tiles以获得更准确的渲染
+
+			int32 TotalPoints = CandidatePoints.Num();
+			FThreadSafeCounter TaskCounter(TotalPoints);
+
+			for (int32 i = 0; i < CandidatePoints.Num(); ++i)
+			{
+				FPathPointWithOrientation& Viewpoint = CandidatePoints[i];
+
+				AsyncTask(ENamedThreads::GameThread, [this, &Viewpoint, &TaskCounter, i, TotalPoints]()
+					{
+						// 更新进度
+						float ProgressPercent = 60.0f + 30.0f * ((float)i / TotalPoints);
+						OnPathGenerationProgress.Broadcast(
+							ProgressPercent,
+							FString::Printf(TEXT("计算美学评分 (%d/%d)..."), i + 1, TotalPoints)
+						);
+
+						// 渲染并获取美学评分
+						RenderViewpointToRenderTarget(Viewpoint);
+						if (NimaTracker)
+						{
+							NimaTracker->RunInference(RenderTarget);
+						}
+
+						while (NimaTracker->GetNimaScore() <= 0)
+						{
+							FPlatformProcess::Sleep(0.001f);
+						}
+
+						Viewpoint.AestheticScore = NimaTracker->GetNimaScore();
+						NimaTracker->ResetNimaScore();
+
+						// 计算覆盖角度
+						Viewpoint.CoverageAngle = CalculateViewpointCoverage(Viewpoint, InterestPoints[Viewpoint.AOIIndex]);
+
+						TaskCounter.Decrement();
+					});
+
+				while (Viewpoint.AestheticScore <= 0)
+				{
+					FPlatformProcess::Sleep(0.001f);
+				}
+			}
+
+			while (TaskCounter.GetValue() > 0)
+			{
+				FPlatformProcess::Sleep(0.001f);
+			}
+
+			DisableForce3DTilesLoad();
+
+			// 计算美学评分统计数据
+			float TotalScore = 0.0f;
+			float MinScore = FLT_MAX;
+			float MaxScore = -FLT_MAX;
+
+			for (const FPathPointWithOrientation& Point : CandidatePoints)
+			{
+				TotalScore += Point.AestheticScore;
+				MinScore = FMath::Min(MinScore, Point.AestheticScore);
+				MaxScore = FMath::Max(MaxScore, Point.AestheticScore);
+			}
+
+			float AvgScore = CandidatePoints.Num() > 0 ? TotalScore / CandidatePoints.Num() : 0.0f;
+
+			// 更新进度
+			AsyncTask(ENamedThreads::GameThread, [this, AvgScore, MinScore, MaxScore]() {
+				OnPathGenerationProgress.Broadcast(90.0f,
+					FString::Printf(TEXT("美学评分完成: 平均=%.2f, 最低=%.2f, 最高=%.2f"),
+						AvgScore, MinScore, MaxScore));
+
+				// 输出美学评分统计
+				UE_LOG(LogTemp, Warning, TEXT("Orbit path aesthetic statistics: Avg=%.2f, Min=%.2f, Max=%.2f"),
+					AvgScore, MinScore, MaxScore);
+				});
+		}
+
+		// 添加当前兴趣区域的路径点到全局路径点
+		GlobalPathPoints.Append(CandidatePoints);
+	}
+
+	// 计算每个点的飞行速度
+	AsyncTask(ENamedThreads::GameThread, [this]() {
+		OnPathGenerationProgress.Broadcast(95.0f, TEXT("计算飞行速度..."));
+		});
+	ComputeSpeedByCurvatureAndViewChange(fMaxFlightSpeed, fMinFlightSpeed);
+
+	// 预计算飞行持续时间
+	AsyncTask(ENamedThreads::GameThread, [this]() {
+		OnPathGenerationProgress.Broadcast(98.0f, TEXT("预计算飞行持续时间..."));
+		});
+	PrecomputeAllDuration();
+
+	// 完成所有处理
+	AsyncTask(ENamedThreads::GameThread, [this]() {
+		// 设置当前索引
+		currentIndex = 0;
+
+		// 启用路径点绘制
+		bShouldDrawPathPoints = true;
+		fGenerationFinished = true;
+
+		OnPathGenerationProgress.Broadcast(100.0f, TEXT("智能环绕航线生成完成"));
+		OnPathGenerationComplete.Broadcast(true);
+
+		GEngine->AddOnScreenDebugMessage(-1, 5.f, FColor::Green,
+			FString::Printf(TEXT("已生成智能环绕航线，共%d个点"), GlobalPathPoints.Num()));
+
+		UE_LOG(LogTemp, Warning, TEXT("已生成智能环绕航线，共%d个点"), GlobalPathPoints.Num());
+		});
+}
+
+
+void ADroneActor1::GenerateTraditionalOrbitAsync()
+{
+	if (bIsGeneratingTraditionalOrbit)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("Traditional orbit generation already in progress"));
+		return;
+	}
+
+	bIsGeneratingTraditionalOrbit = true;
+	TraditionalOrbitTask = new FAsyncTask<FTraditionalOrbitGenerationTask>(
+		this);
+
+	// 启动异步任务
+	TraditionalOrbitTask->StartBackgroundTask();
+
+	// 开始轮询进度
+	GetWorld()->GetTimerManager().SetTimer(
+		TraditionalOrbitTimerHandle,
+		this,
+		&ADroneActor1::CheckTraditionalOrbitProgress,
+		0.1f,
+		true
+	);
+}
+
+void ADroneActor1::CheckTraditionalOrbitProgress()
+{
+	if (!TraditionalOrbitTask) return;
+
+	if (TraditionalOrbitTask->IsDone())
+	{
+		// 任务完成，清理资源
+		GetWorld()->GetTimerManager().ClearTimer(TraditionalOrbitTimerHandle);
+		bIsGeneratingTraditionalOrbit = false;
+
+		delete TraditionalOrbitTask;
+		TraditionalOrbitTask = nullptr;
+	}
+}
+
 
 void ADroneActor1::GenerateSimpleFlightPath()
 {
@@ -1458,7 +1825,7 @@ void ADroneActor1::GenerateOptimizedFlightPath(const FVector& _StartPoint, const
 }
 
 
-void ADroneActor1::CalculateOrbitParameters(const FCylindricalInterestPoint& InterestPoint, 
+void ADroneActor1::CalculateOrbitParameters(const FCylindricalInterestPoint& InterestPoint,
 	float& OutOrbitRadius, float& OutOrbitRadius1, float& OutOrbitRadius2,
 	float& OutMinHeight, float& OutMaxHeight)
 {
@@ -1739,7 +2106,7 @@ float ADroneActor1::CalculateCumulativeTurnAngle(int32 CurrentIndex, int32 Looka
 	return CumulativeTurnAngle;
 }
 
-float ADroneActor1::CalculateViewChange(const FRotator& PrevOrientation, const FRotator& CurrentOrientation, 
+float ADroneActor1::CalculateViewChange(const FRotator& PrevOrientation, const FRotator& CurrentOrientation,
 	const FRotator& NextOrientation, float PrevFOV, float CurrentFOV, float NextFOV)
 {
 	// 计算方向变化（角度差）
@@ -2024,7 +2391,7 @@ void ADroneActor1::ExportPathPointsToWGS84Txt()
 		//--------------------------------------------------------------
 		// (4) 修正 Yaw => 0=北, 且顺时针增大
 		//--------------------------------------------------------------
-		float YawNEU = SaledRotESU.Yaw+90.0f;
+		float YawNEU = SaledRotESU.Yaw + 90.0f;
 		//float Heading = 360.f - YawNEU; // 转换逆时针=>顺时针
 		YawNEU = FMath::Fmod(YawNEU, 360.f);
 		if (YawNEU > 180) {
@@ -2057,7 +2424,7 @@ void ADroneActor1::ExportPathPointsToWGS84Txt()
 			PitchNEU,
 			YawNEU,
 			RollNEU,
-			PathPt.SegmentSpeed/100
+			PathPt.SegmentSpeed / 100
 		);
 		IndexNum++;
 
@@ -2181,86 +2548,291 @@ bool ADroneActor1::ImportPathPointsFromTxt(const FString& LoadFilePath)
 }
 
 
+//void ADroneActor1::SmoothGlobalPathPoints_PositionOrientation(int32 Iterations /*=1*/)
+//{
+//	for (int32 iter = 0; iter < Iterations; ++iter)
+//	{
+//		TArray<FPathPointWithOrientation> TempArray = GlobalPathPoints;
+//
+//		for (int32 i = 1; i < GlobalPathPoints.Num() - 1; ++i)
+//		{
+//			// 平滑位置
+//			const FVector& PrevPos = TempArray[i - 1].Point;
+//			const FVector& CurrPos = TempArray[i].Point;
+//			const FVector& NextPos = TempArray[i + 1].Point;
+//			FVector SmoothedPos = (PrevPos + CurrPos + NextPos) / 3.0f;
+//			GlobalPathPoints[i].Point = SmoothedPos;
+//
+//			// 检测前后点之间的大幅朝向变化
+//			const FRotator& OriPrev = TempArray[i - 1].Orientation;
+//			const FRotator& OriCurr = TempArray[i].Orientation;
+//			const FRotator& OriNext = TempArray[i + 1].Orientation;
+//
+//			float YawDiffPrev = FMath::Abs(FRotator::NormalizeAxis(OriCurr.Yaw - OriPrev.Yaw));
+//			float YawDiffNext = FMath::Abs(FRotator::NormalizeAxis(OriNext.Yaw - OriCurr.Yaw));
+//
+//			bool bLargeYawChange = (YawDiffPrev > 40.f) || (YawDiffNext > 40.f); // 阈值可调整
+//
+//			if (bLargeYawChange)
+//			{
+//				// 定义平滑范围
+//				int32 localRadius = 2; // 包括当前点及后续两点
+//				TArray<FQuat> QuatsToSmooth;
+//
+//				for (int32 Offset = -localRadius; Offset <= localRadius; ++Offset)
+//				{
+//					int32 Index = FMath::Clamp(i + Offset, 0, GlobalPathPoints.Num() - 1);
+//					QuatsToSmooth.Add(TempArray[Index].Orientation.Quaternion());
+//				}
+//
+//				// 计算平滑的平均四元数
+//				FQuat SmoothedQuat = QuatsToSmooth[0];
+//				for (int32 j = 1; j < QuatsToSmooth.Num(); ++j)
+//				{
+//					SmoothedQuat = FQuat::Slerp(SmoothedQuat, QuatsToSmooth[j], 1.0f / (j + 1));
+//				}
+//
+//				// 将平滑后的四元数应用到范围内的点
+//				for (int32 Offset = -localRadius; Offset <= localRadius; ++Offset)
+//				{
+//					int32 Index = FMath::Clamp(i + Offset, 0, GlobalPathPoints.Num() - 1);
+//					GlobalPathPoints[Index].Orientation = SmoothedQuat.Rotator();
+//				}
+//
+//				// 跳过已平滑的范围，避免重复操作
+//				i += localRadius;
+//			}
+//			else
+//			{
+//				// 原有逻辑：保持目标在屏幕上位置不变
+//				int32 AOIIndex = TempArray[i].AOIIndex;
+//				if (!InterestPoints.IsValidIndex(AOIIndex))
+//				{
+//					GlobalPathPoints[i].Orientation = TempArray[i].Orientation;
+//					continue;
+//				}
+//
+//				FVector2D OldScreenPos = CalculateScreenPosition(TempArray[i]);
+//				FVector AOICenter = InterestPoints[AOIIndex].Center;
+//				float ThisFOV = TempArray[i].FOV;
+//
+//				FRotator NewOrientation = CalculateOrientationFromScreenPosition(
+//					SmoothedPos,
+//					AOICenter,
+//					OldScreenPos,
+//					ThisFOV
+//				);
+//
+//				GlobalPathPoints[i].Orientation = NewOrientation;
+//			}
+//		}
+//	}
+//}
+
+
 void ADroneActor1::SmoothGlobalPathPoints_PositionOrientation(int32 Iterations /*=1*/)
 {
-	for (int32 iter = 0; iter < Iterations; ++iter)
-	{
-		TArray<FPathPointWithOrientation> TempArray = GlobalPathPoints;
+    if (GlobalPathPoints.Num() < 3) return;
 
-		for (int32 i = 1; i < GlobalPathPoints.Num() - 1; ++i)
-		{
-			// 平滑位置
-			const FVector& PrevPos = TempArray[i - 1].Point;
-			const FVector& CurrPos = TempArray[i].Point;
-			const FVector& NextPos = TempArray[i + 1].Point;
-			FVector SmoothedPos = (PrevPos + CurrPos + NextPos) / 3.0f;
-			GlobalPathPoints[i].Point = SmoothedPos;
+    for (int32 iter = 0; iter < Iterations; ++iter)
+    {
+        // 复制原始路径点数组，保持原始数据用于计算
+        TArray<FPathPointWithOrientation> OriginalPoints = GlobalPathPoints;
 
-			// 检测前后点之间的大幅朝向变化
-			const FRotator& OriPrev = TempArray[i - 1].Orientation;
-			const FRotator& OriCurr = TempArray[i].Orientation;
-			const FRotator& OriNext = TempArray[i + 1].Orientation;
+        // 对除了首尾点外的所有点进行平滑
+        for (int32 i = 1; i < GlobalPathPoints.Num() - 1; ++i)
+        {
+            // 1. 平滑位置
+            const FVector& PrevPos = OriginalPoints[i - 1].Point;
+            const FVector& CurrPos = OriginalPoints[i].Point;
+            const FVector& NextPos = OriginalPoints[i + 1].Point;
 
-			float YawDiffPrev = FMath::Abs(FRotator::NormalizeAxis(OriCurr.Yaw - OriPrev.Yaw));
-			float YawDiffNext = FMath::Abs(FRotator::NormalizeAxis(OriNext.Yaw - OriCurr.Yaw));
+            const float PositionSmoothWeight = 0.5f;
+            FVector SmoothedPos = FMath::Lerp(
+                CurrPos,
+                (PrevPos + CurrPos + NextPos) / 3.0f,
+                PositionSmoothWeight
+            );
+            GlobalPathPoints[i].Point = SmoothedPos;
 
-			bool bLargeYawChange = (YawDiffPrev > 40.f) || (YawDiffNext > 40.f); // 阈值可调整
+            // 2. 平滑旋转 - 通过四元数插值保持平滑
+            const FQuat PrevQuat = OriginalPoints[i - 1].Orientation.Quaternion();
+            const FQuat CurrQuat = OriginalPoints[i].Orientation.Quaternion();
+            const FQuat NextQuat = OriginalPoints[i + 1].Orientation.Quaternion();
 
-			if (bLargeYawChange)
-			{
-				// 定义平滑范围
-				int32 localRadius = 2; // 包括当前点及后续两点
-				TArray<FQuat> QuatsToSmooth;
+            // 确保四元数在同一半球，避免插值问题
+            FQuat AdjustedPrevQuat = PrevQuat;
+            FQuat AdjustedNextQuat = NextQuat;
 
-				for (int32 Offset = -localRadius; Offset <= localRadius; ++Offset)
-				{
-					int32 Index = FMath::Clamp(i + Offset, 0, GlobalPathPoints.Num() - 1);
-					QuatsToSmooth.Add(TempArray[Index].Orientation.Quaternion());
-				}
+			float DotWithPrev = AdjustedPrevQuat.X * CurrQuat.X +
+				AdjustedPrevQuat.Y * CurrQuat.Y +
+				AdjustedPrevQuat.Z * CurrQuat.Z +
+				AdjustedPrevQuat.W * CurrQuat.W;
 
-				// 计算平滑的平均四元数
-				FQuat SmoothedQuat = QuatsToSmooth[0];
-				for (int32 j = 1; j < QuatsToSmooth.Num(); ++j)
-				{
-					SmoothedQuat = FQuat::Slerp(SmoothedQuat, QuatsToSmooth[j], 1.0f / (j + 1));
-				}
+			float DotWithNext = AdjustedNextQuat.X * CurrQuat.X +
+				AdjustedNextQuat.Y * CurrQuat.Y +
+				AdjustedNextQuat.Z * CurrQuat.Z +
+				AdjustedNextQuat.W * CurrQuat.W;
 
-				// 将平滑后的四元数应用到范围内的点
-				for (int32 Offset = -localRadius; Offset <= localRadius; ++Offset)
-				{
-					int32 Index = FMath::Clamp(i + Offset, 0, GlobalPathPoints.Num() - 1);
-					GlobalPathPoints[Index].Orientation = SmoothedQuat.Rotator();
-				}
+            if (DotWithPrev < 0) AdjustedPrevQuat = -AdjustedPrevQuat;
+            if (DotWithNext < 0) AdjustedNextQuat = -AdjustedNextQuat;
 
-				// 跳过已平滑的范围，避免重复操作
-				i += localRadius;
-			}
-			else
-			{
-				// 原有逻辑：保持目标在屏幕上位置不变
-				int32 AOIIndex = TempArray[i].AOIIndex;
-				if (!InterestPoints.IsValidIndex(AOIIndex))
-				{
-					GlobalPathPoints[i].Orientation = TempArray[i].Orientation;
-					continue;
-				}
+            // 使用双重插值，先分别与前后点插值，再将结果插值
+            FQuat MidQuat1 = FQuat::Slerp(AdjustedPrevQuat, CurrQuat, 0.5f);
+            FQuat MidQuat2 = FQuat::Slerp(CurrQuat, AdjustedNextQuat, 0.5f);
+            FQuat SmoothedQuat = FQuat::Slerp(MidQuat1, MidQuat2, 0.5f);
+            SmoothedQuat.Normalize();
 
-				FVector2D OldScreenPos = CalculateScreenPosition(TempArray[i]);
-				FVector AOICenter = InterestPoints[AOIIndex].Center;
-				float ThisFOV = TempArray[i].FOV;
+            // 应用旋转平滑权重
+            const float RotationSmoothWeight = 0.4f; // 适中的权重，可以根据需要调整
+            FQuat FinalQuat = FQuat::Slerp(CurrQuat, SmoothedQuat, RotationSmoothWeight);
+            FinalQuat.Normalize();
 
-				FRotator NewOrientation = CalculateOrientationFromScreenPosition(
-					SmoothedPos,
-					AOICenter,
-					OldScreenPos,
-					ThisFOV
-				);
+            GlobalPathPoints[i].Orientation = FinalQuat.Rotator();
 
-				GlobalPathPoints[i].Orientation = NewOrientation;
-			}
-		}
-	}
+            // 3. 平滑FOV
+            const float FOVSmoothWeight = 0.3f;
+            float SmoothedFOV = (OriginalPoints[i - 1].FOV + OriginalPoints[i].FOV + OriginalPoints[i + 1].FOV) / 3.0f;
+            GlobalPathPoints[i].FOV = FMath::Lerp(OriginalPoints[i].FOV, SmoothedFOV, FOVSmoothWeight);
+        }
+    }
+
+    // 路径点优化 - 减少冗余点
+    OptimizePathPoints();
 }
+
+void ADroneActor1::OptimizePathPoints()
+{
+	if (GlobalPathPoints.Num() < 4) return; // 至少需要4个点才能优化
+
+	TArray<FPathPointWithOrientation> OptimizedPath;
+	OptimizedPath.Add(GlobalPathPoints[0]); // 始终保留第一个点
+
+	// 用于碰撞检测的参数
+	FCollisionQueryParams QueryParams;
+	QueryParams.AddIgnoredActor(this);
+
+	const float MinDistanceThreshold = 100.0f; // 最小点间距离
+	const float MaxAngleDeviation = 15.0f;     // 最大角度偏差（度）
+	const float MaxFOVDeviation = 5.0f;        // 最大FOV偏差
+
+	int32 CurrentIndex = 0;
+
+	while (CurrentIndex < GlobalPathPoints.Num() - 1)
+	{
+		int32 NextRetainedIndex = CurrentIndex + 1;
+		bool bFoundRetained = false;
+
+		// 尝试跳过中间点
+		for (int32 TestIndex = CurrentIndex + 2; TestIndex < GlobalPathPoints.Num(); ++TestIndex)
+		{
+			const FPathPointWithOrientation& StartPoint = GlobalPathPoints[CurrentIndex];
+			const FPathPointWithOrientation& EndPoint = GlobalPathPoints[TestIndex];
+
+			// 检查1: 路径是否过长？避免过度简化
+			float PathLength = FVector::Dist(StartPoint.Point, EndPoint.Point);
+			if (PathLength > 500.0f) // 最大跨度阈值
+			{
+				break;
+			}
+
+			// 检查2: 旋转变化是否在可接受范围内？
+			float YawDiff = FMath::Abs(FMath::FindDeltaAngleDegrees(StartPoint.Orientation.Yaw, EndPoint.Orientation.Yaw));
+			float PitchDiff = FMath::Abs(FMath::FindDeltaAngleDegrees(StartPoint.Orientation.Pitch, EndPoint.Orientation.Pitch));
+
+			if (YawDiff > MaxAngleDeviation || PitchDiff > MaxAngleDeviation)
+			{
+				continue;
+			}
+
+			// 检查3: FOV变化是否在可接受范围内？
+			float FOVDiff = FMath::Abs(StartPoint.FOV - EndPoint.FOV);
+			if (FOVDiff > MaxFOVDeviation)
+			{
+				continue;
+			}
+
+			// 检查4: 从起点到终点的直线路径是否有障碍物？
+			FHitResult HitResult;
+			bool bHit = GetWorld()->LineTraceSingleByChannel(
+				HitResult,
+				StartPoint.Point,
+				EndPoint.Point,
+				ECC_Visibility,
+				QueryParams
+			);
+
+			if (bHit)
+			{
+				continue; // 有障碍物，不能跳过中间点
+			}
+
+			// 检查5: 是否与其他兴趣区域相交？
+			bool bIntersectsOtherAOI = false;
+			for (int32 i = 0; i < InterestPoints.Num(); ++i)
+			{
+				const FCylindricalInterestPoint& AOI = InterestPoints[i];
+				// 原来错误地使用了AOI.AOIIndex，现在改为使用StartPoint中存储的AOI索引与当前AOI索引比较
+				if (i == StartPoint.AOIIndex) continue; // 跳过同一个兴趣区域
+
+				// 检查路径是否穿过圆柱体
+				// 简化方式：检查中点和几个插值点
+				const int32 NumCheckPoints = 5;
+				for (int32 j = 1; j < NumCheckPoints; ++j)
+				{
+					float Alpha = static_cast<float>(j) / NumCheckPoints;
+					FVector CheckPoint = FMath::Lerp(StartPoint.Point, EndPoint.Point, Alpha);
+
+					// 计算点到圆柱中心轴的距离
+					FVector CheckPointXY(CheckPoint.X, CheckPoint.Y, 0);
+					FVector AOICenterXY(AOI.Center.X, AOI.Center.Y, 0);
+					float DistToAxis = FVector::Dist(CheckPointXY, AOICenterXY);
+
+					// 检查高度
+					bool bInHeight = CheckPoint.Z >= AOI.BottomCenter.Z &&
+						CheckPoint.Z <= AOI.BottomCenter.Z + AOI.Height;
+
+					if (bInHeight && DistToAxis <= AOI.Radius + AOI.MinSafetyDistance)
+					{
+						bIntersectsOtherAOI = true;
+						break;
+					}
+				}
+
+				if (bIntersectsOtherAOI) break;
+			}
+
+			if (bIntersectsOtherAOI)
+			{
+				continue; // 与其他兴趣区域相交，不能跳过
+			}
+
+			// 所有检查都通过，我们可以跳过中间点
+			NextRetainedIndex = TestIndex;
+			bFoundRetained = true;
+		}
+
+		// 添加下一个保留的点
+		OptimizedPath.Add(GlobalPathPoints[NextRetainedIndex]);
+		CurrentIndex = NextRetainedIndex;
+	}
+
+	// 确保最后一个点被包含
+	if (OptimizedPath.Last().Point != GlobalPathPoints.Last().Point)
+	{
+		OptimizedPath.Add(GlobalPathPoints.Last());
+	}
+
+	// 计算优化率
+	float OptimizationRatio = 1.0f - (float)OptimizedPath.Num() / GlobalPathPoints.Num();
+
+	UE_LOG(LogTemp, Log, TEXT("Path optimized: %d points reduced to %d (%.1f%% reduction)"),
+		GlobalPathPoints.Num(), OptimizedPath.Num(), OptimizationRatio * 100.0f);
+
+	// 更新全局路径点
+	GlobalPathPoints = OptimizedPath;
+}
+
 
 
 void ADroneActor1::ComputeSpeedByCurvatureAndViewChange(float MaxSpeed, float MinSpeed, float SharpTurnAngle, float MaxViewChangeAngle, int32 LookaheadPoints)
@@ -2277,7 +2849,7 @@ void ADroneActor1::ComputeSpeedByCurvatureAndViewChange(float MaxSpeed, float Mi
 	}
 
 	// 首尾速度可固定设置为MaxSpeed(可根据需求修改)
-	GlobalPathPoints[0].SegmentSpeed = (MinSpeed+MaxSpeed)/2;
+	GlobalPathPoints[0].SegmentSpeed = (MinSpeed + MaxSpeed) / 2;
 	GlobalPathPoints[NumPts - 1].SegmentSpeed = MinSpeed;
 
 	// 标记高Yaw变化区域
@@ -2306,7 +2878,7 @@ void ADroneActor1::ComputeSpeedByCurvatureAndViewChange(float MaxSpeed, float Mi
 			}
 		}
 	}
-		
+
 	// 遍历路径点（从第1到倒数第2）
 	for (int32 i = 1; i < NumPts - 1; ++i)
 	{
@@ -2340,13 +2912,13 @@ void ADroneActor1::ComputeSpeedByCurvatureAndViewChange(float MaxSpeed, float Mi
 		float AverageViewChange = (SamplesCount > 0.f) ? (CumulativeViewChange / SamplesCount) : 0.f;
 
 		// 4) 转角影响因子
-		float TurnAngleFactor = FMath::Clamp(10*AverageTurnAngle / SharpTurnAngle, 0.0f, 1.0f);
+		float TurnAngleFactor = FMath::Clamp(10 * AverageTurnAngle / SharpTurnAngle, 0.0f, 1.0f);
 
 		// 5) 视角变化影响因子
-		float ViewChangeFactor = FMath::Clamp(10*AverageViewChange / MaxViewChangeAngle, 0.0f, 1.0f);
+		float ViewChangeFactor = FMath::Clamp(10 * AverageViewChange / MaxViewChangeAngle, 0.0f, 1.0f);
 
 		// 6) 综合影响因子
-		float CombinedFactor = FMath::Clamp(TurnAngleFactor+ ViewChangeFactor,0.0f,1.0f);
+		float CombinedFactor = FMath::Clamp(TurnAngleFactor + ViewChangeFactor, 0.0f, 1.0f);
 
 		// 应用高Yaw变化区域影响
 		if (bSlowRegion[i])
@@ -2373,7 +2945,7 @@ void ADroneActor1::GenerateOrbitFlightPath_Internal()
 
 	TArray<double> TimeArray;
 	double StartTime = FPlatformTime::Seconds();
-	
+
 
 	// 清空现有的路径点和兴趣区域
 	GlobalPathPoints.Empty();
@@ -2420,10 +2992,10 @@ void ADroneActor1::GenerateOrbitFlightPath_Internal()
 		FCylindricalInterestPoint& InterestPoint = InterestPoints[currentAOIIndex];
 		FInterestArea currentInterestArea;
 		float OrbitRadius, OrbitRadius1, OrbitRadius2, MinHeight, MaxHeight;
-		CalculateOrbitParameters(InterestPoint, 
-			OrbitRadius,OrbitRadius1,OrbitRadius2,
+		CalculateOrbitParameters(InterestPoint,
+			OrbitRadius, OrbitRadius1, OrbitRadius2,
 			MinHeight, MaxHeight);
-		TArray<float> AllRadius = { OrbitRadius,OrbitRadius1};
+		TArray<float> AllRadius = { OrbitRadius,OrbitRadius1 };
 
 		TArray<float> Heights;
 		Heights.Add(MinHeight);
@@ -2478,7 +3050,7 @@ void ADroneActor1::GenerateOrbitFlightPath_Internal()
 				currentAngle += AngleIncrementD;
 			}
 		}
-		
+
 
 		// 测试显示当前兴趣区域的初始路径点
 		TestPathPoints.Append(currentInterestArea.PathPoints);
@@ -2509,24 +3081,24 @@ void ADroneActor1::GenerateOrbitFlightPath_Internal()
 			//UE_LOG(LogTemp, Warning, TEXT("Processing %dof %d viewpoint combinations"), count+1, BestViewpointCombinations.Num());
 			// 生成样条曲线路径点
 			TArray<FPathPointWithOrientation> SplinePoints;
-			GenerateSplinePath(Combination, SplinePoints,fMinDisBetwenPoints);
+			GenerateSplinePath(Combination, SplinePoints, fMinDisBetwenPoints);
 
 			// 更新最大路径长度
 			float PathLength = CalculatePathLength(SplinePoints);
 			MaxPathLength = FMath::Max(MaxPathLength, PathLength);
 			count++;
-		} 
+		}
 
 		// 遍历每个视点组合
 		count = 0;
 		for (const auto& Combination : BestViewpointCombinations)
 		{
-			UE_LOG(LogTemp, Warning, TEXT("Processing %d of %d viewpoint combination"), count+1, Combination.Num());
+			UE_LOG(LogTemp, Warning, TEXT("Processing %d of %d viewpoint combination"), count + 1, Combination.Num());
 
 			// 生成样条曲线路径点
 			TArray<FPathPointWithOrientation> SplinePoints;
 			TArray<FPathPointWithOrientation> CurrentControlPoints;
-			CurrentControlPoints=GenerateSplinePath(Combination, SplinePoints,fMinDisBetwenPoints);
+			CurrentControlPoints = GenerateSplinePath(Combination, SplinePoints, fMinDisBetwenPoints);
 
 			// 检查路径是否无碰撞
 			if (!IsPathCollisionFree(SplinePoints))
@@ -2547,31 +3119,31 @@ void ADroneActor1::GenerateOrbitFlightPath_Internal()
 			{
 				BestCost = TotalCost;
 				BestSplinePoints = SplinePoints;
-				BestControlPoints =(CurrentControlPoints);
+				BestControlPoints = (CurrentControlPoints);
 				BestCombination = Combination; // 保存最佳视点组合
 			}
 			count++;
 		}
 
 		// 如果没有找到最佳曲线，先暂时放进去一条测试
-		if (BestSplinePoints.Num() == 0&& !BestViewpointCombinations.IsEmpty())
+		if (BestSplinePoints.Num() == 0 && !BestViewpointCombinations.IsEmpty())
 		{
 			TArray<FPathPointWithOrientation> Combination = BestViewpointCombinations[0];
-			
+
 			TArray<FPathPointWithOrientation> SplinePoints;
 			TArray<FPathPointWithOrientation> CurrentControlPoints;
-			CurrentControlPoints=GenerateSplinePath(Combination, SplinePoints,fMinDisBetwenPoints);
+			CurrentControlPoints = GenerateSplinePath(Combination, SplinePoints, fMinDisBetwenPoints);
 			if (CurrentControlPoints.Num() == 0)
 			{
 				UE_LOG(LogTemp, Warning, TEXT("No control points generated!"));
 				continue;
 			}
-			BestControlPoints =(CurrentControlPoints);
+			BestControlPoints = (CurrentControlPoints);
 			BestSplinePoints = SplinePoints;
 
 			UE_LOG(LogTemp, Warning, TEXT("No optimal path found! Using a test path"));
 		}
-		else if(BestViewpointCombinations.IsEmpty()){
+		else if (BestViewpointCombinations.IsEmpty()) {
 			UE_LOG(LogTemp, Warning, TEXT("Spline generation failed. Using original path."));
 			BestSplinePoints = currentInterestArea.PathPoints;
 		}
@@ -2639,14 +3211,14 @@ void ADroneActor1::GenerateOrbitFlightPath_Internal()
 	UE_LOG(LogTemp, Log, TEXT("Best Order: %s"), *BestOrderString);
 
 	TArray<FPathPointWithOrientation> FinalPath = BuildFinalPath(BestOrder);
-	UE_LOG(LogTemp,Warning, TEXT("Successfully build final path."));
+	UE_LOG(LogTemp, Warning, TEXT("Successfully build final path."));
 
 	GlobalPathPoints.Append(FinalPath);
 
 	SmoothGlobalPathPoints_PositionOrientation(2);
 
 	// 计算所有速度
-	ComputeSpeedByCurvatureAndViewChange(fMaxFlightSpeed,fMinFlightSpeed);
+	ComputeSpeedByCurvatureAndViewChange(fMaxFlightSpeed, fMinFlightSpeed);
 	UE_LOG(LogTemp, Warning, TEXT("Successfully compute speed."));
 
 	double Time4 = FPlatformTime::Seconds();
@@ -2726,8 +3298,8 @@ FPathPointWithOrientation ADroneActor1::TestGenerateCandidateViewpoints(
 
 		// 计算 Pitch 和 Yaw 的偏移
 		// 加上负号就正确了
-		double PitchOffset = - FMath::RadiansToDegrees(FMath::Atan2(IdealPos.Key.Y, FocalLength));
-		double YawOffset = - FMath::RadiansToDegrees(FMath::Atan2(IdealPos.Key.X* AspectRatio, FocalLength));
+		double PitchOffset = -FMath::RadiansToDegrees(FMath::Atan2(IdealPos.Key.Y, FocalLength));
+		double YawOffset = -FMath::RadiansToDegrees(FMath::Atan2(IdealPos.Key.X * AspectRatio, FocalLength));
 
 		// 更新目标旋转角度
 		Candidate.TargetRotation = BaseRotation + FRotator(PitchOffset, YawOffset, 0.0f);
@@ -2759,7 +3331,7 @@ FPathPointWithOrientation ADroneActor1::TestGenerateCandidateViewpoints(
 		{
 			UE_LOG(LogTemp, Warning, TEXT("Projected screen position: %s"), *ScreenPosition.ToString());
 		}
-		
+
 		GlobalPathPoints.Add(viewCandidate);
 	}
 
@@ -2795,7 +3367,7 @@ FPathPointWithOrientation ADroneActor1::TestGenerateCandidateViewpoints(
 void ADroneActor1::OnTestGenerateCandidateViewpoints()
 {
 
-	if (InterestPoints.Num()== 0) {
+	if (InterestPoints.Num() == 0) {
 
 		GEngine->AddOnScreenDebugMessage(-1, 5.f, FColor::Yellow, TEXT("No interest points available!"));
 		UE_LOG(LogTemp, Warning, TEXT("No interest points available!"));
@@ -2803,7 +3375,7 @@ void ADroneActor1::OnTestGenerateCandidateViewpoints()
 	}
 
 	if (fGenerationFinished == false) {
-		
+
 		// 重置当前索引
 		currentIndex = 0;
 		GlobalPathPoints.Empty();
@@ -2815,7 +3387,7 @@ void ADroneActor1::OnTestGenerateCandidateViewpoints()
 		FVector DronePosition = GetActorLocation();
 		FRotator DroneOrientation = GetActorRotation();
 
-		FPathPointWithOrientation RandomPathPoint = { DronePosition ,DroneOrientation, CameraComponent->FieldOfView};
+		FPathPointWithOrientation RandomPathPoint = { DronePosition ,DroneOrientation, CameraComponent->FieldOfView };
 		RandomPathPoint.AOIIndex = 0;
 
 		// 生成候选视点
@@ -2850,7 +3422,7 @@ void ADroneActor1::OnTestGenerateCandidateViewpoints()
 			DrawDebugLine(GetWorld(), PathPoint.Point, OrientationEnd, FColor::Red, true, 0.1f, 0, 2.0f);
 			//SplineComponent->AddSplinePoint(PathPoint.Point, ESplineCoordinateSpace::World);
 		}
-		
+
 		// 清空兴趣点和路径点
 		/*InterestPoints.Empty();
 		GlobalPathPoints.Empty();
@@ -2860,7 +3432,7 @@ void ADroneActor1::OnTestGenerateCandidateViewpoints()
 
 		//GEngine->AddOnScreenDebugMessage(-1, 5.f, FColor::Yellow, TEXT("Stop drawing path points"));
 	}
-	
+
 }
 
 
@@ -2891,7 +3463,7 @@ FPathPointWithOrientation ADroneActor1::GenerateCandidateViewpoints(
 	};
 
 	// 定义焦距
-	const float FocalLength = 1.0f / FMath::Tan(FMath::DegreesToRadians(CameraComponent->FieldOfView/ 2.0f));
+	const float FocalLength = 1.0f / FMath::Tan(FMath::DegreesToRadians(CameraComponent->FieldOfView / 2.0f));
 	const float AspectRatio = CameraComponent->AspectRatio;
 
 	// 生成候选视点
@@ -2908,8 +3480,8 @@ FPathPointWithOrientation ADroneActor1::GenerateCandidateViewpoints(
 		FRotator BaseRotation = ToTarget.Rotation();  // 从目标位置到路径点的位置差生成旋转
 
 		// 计算 Pitch 和 Yaw 的偏移
-		float PitchOffset = - FMath::RadiansToDegrees(FMath::Atan2(IdealPos.Key.Y, FocalLength));
-		float YawOffset = - FMath::RadiansToDegrees(FMath::Atan2(IdealPos.Key.X*AspectRatio, FocalLength));
+		float PitchOffset = -FMath::RadiansToDegrees(FMath::Atan2(IdealPos.Key.Y, FocalLength));
+		float YawOffset = -FMath::RadiansToDegrees(FMath::Atan2(IdealPos.Key.X * AspectRatio, FocalLength));
 
 		// 更新目标旋转角度
 		Candidate.TargetRotation = BaseRotation + FRotator(PitchOffset, YawOffset, 0.0f);
@@ -3099,7 +3671,7 @@ float ADroneActor1::CalculatePathLength(const TArray<FPathPointWithOrientation>&
 // @return 返回给定位置到最近障碍物的距离
 float ADroneActor1::GetClosestObstacleDistance(const FVector& Position,
 	const TArray<FCylindricalInterestPoint>& AllInterestPoints,
-	int32 CurrentAOIIndex,float DetectionRadius=1000.0f)
+	int32 CurrentAOIIndex, float DetectionRadius)
 {
 	float ClosestDistance = TNumericLimits<float>::Max();
 
@@ -3699,7 +4271,7 @@ void ADroneActor1::SelectBestViewpointGroups(
 	// 筛选美学评分高于阈值的视点
 	// 以及视点是否看到了兴趣点的顶部
 	TArray<FPathPointWithOrientation> FilteredViewpoints;
-	for ( FPathPointWithOrientation& Viewpoint : ScoredViewpoints)
+	for (FPathPointWithOrientation& Viewpoint : ScoredViewpoints)
 	{
 		// 获取对应的兴趣区域
 		const FCylindricalInterestPoint& AOI = InterestPoints[Viewpoint.AOIIndex];
@@ -3733,7 +4305,7 @@ void ADroneActor1::SelectBestViewpointGroups(
 			}
 		}
 
-		if (Viewpoint.AestheticScore >= AestheticScoreThreshold&&DoesViewpointSeeTop(Viewpoint, InterestPoints[Viewpoint.AOIIndex]))
+		if (Viewpoint.AestheticScore >= AestheticScoreThreshold && DoesViewpointSeeTop(Viewpoint, InterestPoints[Viewpoint.AOIIndex]))
 		{
 			FilteredViewpoints.Add(Viewpoint);
 		}
@@ -3870,13 +4442,13 @@ FVector ComputeSimpleTopEdgeEndpoint(
 	const FCylindricalInterestPoint& InterestPoint)
 {
 	// 兴趣区域顶部平面高度
-	float TopZ = InterestPoint.BottomCenter.Z+ InterestPoint.Height;
+	float TopZ = InterestPoint.BottomCenter.Z + InterestPoint.Height;
 
 	// 将视点投影到与顶部中心相同高度的平面上
 	FVector ViewpointProjected = FVector(ViewpointLocation.X, ViewpointLocation.Y, TopZ);
 
 	// 计算从顶部中心到投影点的水平向量
-	FVector Dir = (ViewpointProjected - (InterestPoint.BottomCenter+ InterestPoint.Height));
+	FVector Dir = (ViewpointProjected - (InterestPoint.BottomCenter + InterestPoint.Height));
 	// 忽略垂直方向
 	Dir.Z = 0.f;
 
@@ -3905,7 +4477,7 @@ bool ADroneActor1::DoesViewpointSeeTopAndBottom(
 {
 	// 计算兴趣区域的顶部和平面位置
 	FVector BottomCenter = InterestPoint.BottomCenter;
-	FVector TopPoint = BottomCenter + FVector(0.f, 0.f, InterestPoint.Height+ InterestPoint.MinSafetyDistance);
+	FVector TopPoint = BottomCenter + FVector(0.f, 0.f, InterestPoint.Height + InterestPoint.MinSafetyDistance);
 
 	// 计算从视点到顶部和平面的方向向量
 	FVector DirToTop = (TopPoint - Viewpoint.Point).GetSafeNormal();
@@ -3991,7 +4563,7 @@ bool ADroneActor1::DoesViewpointSeeTop(
 	float HalfFOV = Viewpoint.FOV / 2.0f;
 
 	// 检查视角是否同时覆盖顶部和平面中心
-	if (!(AngleToTop <= HalfFOV ))
+	if (!(AngleToTop <= HalfFOV))
 	{
 		return false;
 	}
@@ -4138,6 +4710,18 @@ float ADroneActor1::CalculateGroupAestheticScore(const TArray<FPathPointWithOrie
 
 // ----------------------------
 // 曲线工具函数
+
+/**
+ * 对视点数组进行环绕顺序排序
+ *
+ * 该函数将视点数组按照围绕中心点的角度顺序排列，使它们形成一个连续的环绕路径。
+ * 排序过程首先计算所有视点的几何中心，然后根据每个视点相对于该中心点的角度进行排序。
+ * 函数还会检测并处理高度变化的情况，确保生成的路径在竖直方向上平滑过渡。
+ *
+ * @param Viewpoints 需要排序的视点数组，函数会直接修改此数组
+ *
+ * 注意：如果视点数量少于3个，函数将直接返回不做任何处理
+ */
 void ADroneActor1::SortViewpointsInWrappingOrder(TArray<FPathPointWithOrientation>& Viewpoints)
 {
 	if (Viewpoints.Num() < 3) return;
@@ -4202,7 +4786,7 @@ void ADroneActor1::SortControlPointsInWrappingOrder(TArray<FPathPointWithOrienta
 
 
 FPathPointWithOrientation ADroneActor1::GenerateControlPointTowardsNext(
-	const FPathPointWithOrientation& CurrentPoint, const FPathPointWithOrientation& NextPoint, 
+	const FPathPointWithOrientation& CurrentPoint, const FPathPointWithOrientation& NextPoint,
 	const FVector _PlaneNormal, float ControlPointDistanceRatio)
 {
 	FPathPointWithOrientation ControlPoint;
@@ -4243,7 +4827,7 @@ FPathPointWithOrientation ADroneActor1::GenerateControlPointTowardsNext(
 }
 
 FPathPointWithOrientation ADroneActor1::GenerateControlPointTowardsPrev(
-	const FPathPointWithOrientation& CurrentPoint, const FPathPointWithOrientation& PrevPoint, 
+	const FPathPointWithOrientation& CurrentPoint, const FPathPointWithOrientation& PrevPoint,
 	const FVector _PlaneNormal, float ControlPointDistanceRatio)
 {
 	FPathPointWithOrientation ControlPoint;
@@ -4314,7 +4898,7 @@ TArray<FPathPointWithOrientation> ADroneActor1::GenerateSplinePath(
 	for (int32 i = 0; i < SortedViewpoints.Num(); ++i)
 	{
 		const FPathPointWithOrientation& CurrentPoint = SortedViewpoints[i];
-		
+
 
 		if (i == 0)
 		{
@@ -4644,7 +5228,7 @@ FRotator ADroneActor1::CalculateOrientationFromScreenPosition(
 
 	// 计算 Pitch 和 Yaw 的偏移
 	float PitchOffset = -FMath::RadiansToDegrees(FMath::Atan2(ScreenPosition.Y, FocalLength));
-	float YawOffset = -FMath::RadiansToDegrees(FMath::Atan2(ScreenPosition.X* AspectRatio, FocalLength));
+	float YawOffset = -FMath::RadiansToDegrees(FMath::Atan2(ScreenPosition.X * AspectRatio, FocalLength));
 	FRotator _TargetRotation = _BaseRotation + FRotator(PitchOffset, YawOffset, 0.0f);
 
 	return _TargetRotation;
@@ -5207,7 +5791,7 @@ bool ADroneActor1::BuildLinkRoute(
 )
 {
 	// 使用通用逻辑生成路径段并处理
-	return BuildAndProcessPathSegment(StartPos, EndPos, StartRegionIndex, TargetRegionIndex, OutCost, OutPath,LocalRRTClass);
+	return BuildAndProcessPathSegment(StartPos, EndPos, StartRegionIndex, TargetRegionIndex, OutCost, OutPath, LocalRRTClass);
 }
 
 
@@ -5245,7 +5829,7 @@ bool ADroneActor1::BuildRegionToEndRoute(
 
 bool ADroneActor1::BuildSTSPCostMatrix(TArray<FDoubleArray>& OutCostMatrix)
 {
-	UE_LOG(LogTemp,Warning , TEXT("Building Cost Matrix"));
+	UE_LOG(LogTemp, Warning, TEXT("Building Cost Matrix"));
 
 	int32 NumRegions = InterestAreas.Num();
 	int32 NumNodes = 2 + 2 * NumRegions; // 0:Start, 1:End; 2/3:Region0 Entry/Exit; 4/5:Region1 Entry/Exit; etc.
@@ -5341,7 +5925,7 @@ bool ADroneActor1::BuildSTSPCostMatrix(TArray<FDoubleArray>& OutCostMatrix)
 			float CurrentProgress = (static_cast<float>(Progress) / TotalComputation) * 100.0f;
 			int UpdateFrequency = 2; // 每处理100次迭代更新一次
 			if (Progress % UpdateFrequency == 0) {
-				
+
 				AsyncTask(ENamedThreads::GameThread, [this, CurrentProgress]() {
 					OnPathGenerationProgress.Broadcast(CurrentProgress, TEXT("Building STSP Cost Matrix..."));
 					});
@@ -5663,8 +6247,49 @@ void ADroneActor1::CheckGenerationProgress()
 }
 
 
+void ADroneActor1::OnGenerateTraditionalOrbit()
+{
+	// 如果已经有路径，先清除
+	if (fGenerationFinished)
+	{
+		GlobalPathPoints.Empty();
+		bShouldDrawPathPoints = false;
+		fGenerationFinished = false;
+		DestroyPathPoints();
+		return;
+	}
 
+	if (bIsGeneratingTraditionalOrbit || bIsGeneratingPath)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("Path generation already in progress"));
+		return;
+	}
 
+	// 绑定事件处理器 - 确保未重复绑定
+	if (!OnPathGenerationProgress.IsAlreadyBound(this, &ADroneActor1::OnPathGenerationProgressUpdate))
+	{
+		OnPathGenerationProgress.AddDynamic(
+			this,
+			&ADroneActor1::OnPathGenerationProgressUpdate
+		);
+	}
+
+	if (!OnPathGenerationComplete.IsAlreadyBound(this, &ADroneActor1::OnPathGenerationCompleted))
+	{
+		OnPathGenerationComplete.AddDynamic(
+			this,
+			&ADroneActor1::OnPathGenerationCompleted
+		);
+	}
+
+	// 启动异步任务 - 默认单一半径和高度
+	GenerateTraditionalOrbitAsync();
+
+	// 如果需要多半径或多高度，可以使用以下调用:
+	// GenerateTraditionalOrbitAsync(true, false);  // 多半径，单一高度
+	// GenerateTraditionalOrbitAsync(false, true);  // 单一半径，多高度
+	// GenerateTraditionalOrbitAsync(true, true);   // 多半径，多高度
+}
 
 
 
@@ -5876,39 +6501,248 @@ void ADroneActor1::OnStartTracking()
 	}
 }
 
-void ADroneActor1::OnCaptureScreenshotWithUI(bool ifWithUI)
+//void ADroneActor1::OnCaptureScreenshotWithUI(bool ifWithUI)
+//{
+//	// 如果截图操作正在进行中，直接返回
+//	if (bScreenshotInProgress)
+//	{
+//		return;
+//	}
+//	bScreenshotInProgress = true; // 设置截图操作正在进行中
+//
+//	// 使用异步任务在后台线程处理
+//	AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, [this, ifWithUI]()
+//		{
+//			// 获取当前时间
+//			FDateTime Now = FDateTime::Now();
+//
+//			// 格式化时间为字符串（例如：20231025_153045）
+//			FString Timestamp = Now.ToString(TEXT("%Y%m%d_%H%M%S"));
+//
+//			// 设置截图文件名，包含时间戳
+//			FString ScreenshotName = FString::Printf(TEXT("Screenshot_%s.png"), *Timestamp);
+//
+//			// 选择保存目录：项目的 Saved/CapturedImages 目录
+//			FString SaveDirectory = FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("CapturedImages"));
+//			IPlatformFile& PlatformFile = FPlatformFileManager::Get().GetPlatformFile();
+//
+//			// 检查目录是否存在，如果不存在则创建
+//			if (!PlatformFile.DirectoryExists(*SaveDirectory))
+//			{
+//				bool bCreated = PlatformFile.CreateDirectory(*SaveDirectory);
+//				if (!bCreated)
+//				{
+//					UE_LOG(LogTemp, Error, TEXT("Failed to create directory: %s"), *SaveDirectory);
+//				}
+//			}
+//
+//			FString FullPath = FPaths::Combine(SaveDirectory, ScreenshotName);
+//
+//			// 在后台线程请求截图
+//			FScreenshotRequest::RequestScreenshot(FullPath, ifWithUI, false);
+//
+//			// 完成后发送通知回到游戏线程
+//			AsyncTask(ENamedThreads::GameThread, [this]()
+//				{
+//					bScreenshotInProgress = false;
+//				});
+//		});
+//
+//
+//	//// 请求截图，并启用 UI 捕获
+//	//FScreenshotRequest::RequestScreenshot(FullPath, ifWithUI, false); // 第二个参数为 `bCaptureUI`
+//
+//	//// 确保截图完成
+//	//if (FScreenshotRequest::IsScreenshotRequested())
+//	//{
+//	//	UE_LOG(LogTemp, Log, TEXT("Screenshot with UI requested: %s"), *ScreenshotName);
+//	//}
+//}
+
+void ADroneActor1::CaptureScreenshotLowOverhead(bool ifWithUI)
 {
-	// 获取当前时间
-	FDateTime Now = FDateTime::Now();
+	// 这个函数必须在游戏线程中调用
+	check(IsInGameThread());
 
-	// 格式化时间为字符串（例如：20231025_153045）
-	FString Timestamp = Now.ToString(TEXT("%Y%m%d_%H%M%S"));
+	// 确保RenderTarget已初始化
+	if (!RenderTarget)
+	{
+		InitializeRenderTarget();
+	}
 
-	// 设置截图文件名，包含时间戳
-	FString ScreenshotName = FString::Printf(TEXT("Screenshot_%s.png"), *Timestamp);
-	// 选择保存目录：项目的 Saved/CapturedImages 目录
+	// 捕获当前场景到RenderTarget
+	SceneCaptureComponent->CaptureScene();
+
+	// 获取当前时间和设置文件名
+	FString Timestamp = FDateTime::Now().ToString(TEXT("%Y%m%d_%H%M%S"));
+	FString ScreenshotName = FString::Printf(TEXT("Screenshot_%s_%04d.png"), *Timestamp, ScreenshotCounter++);
 	FString SaveDirectory = FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("CapturedImages"));
+	FString FullPath = FPaths::Combine(SaveDirectory, ScreenshotName);
+
+	// 创建目录
 	IPlatformFile& PlatformFile = FPlatformFileManager::Get().GetPlatformFile();
-	// 检查目录是否存在，如果不存在则创建
 	if (!PlatformFile.DirectoryExists(*SaveDirectory))
 	{
-		bool bCreated = PlatformFile.CreateDirectory(*SaveDirectory);
+		PlatformFile.CreateDirectoryTree(*SaveDirectory);
+	}
+
+	// 在游戏线程中获取RenderTarget资源，然后安排渲染线程命令
+	FTextureRenderTargetResource* RTResource = RenderTarget->GameThread_GetRenderTargetResource();
+	if (RTResource)
+	{
+		struct FReadSurfaceContext
+		{
+			FTextureRenderTargetResource* SrcRenderTarget;
+			FString FilePath;
+			FIntRect Rect;
+			bool* bScreenshotInProgressPtr;  // 添加一个指向标志的指针
+		};
+
+		FReadSurfaceContext Context =
+		{
+			RTResource,
+			FullPath,
+			FIntRect(0, 0, RenderTarget->SizeX, RenderTarget->SizeY),
+			&bScreenshotInProgress  // 传递标志的引用
+		};
+
+		// 在渲染线程中读取像素并保存文件
+		ENQUEUE_RENDER_COMMAND(ReadSurfaceCommand)(
+			[Context](FRHICommandListImmediate& RHICmdList)
+			{
+				TArray<FColor> OutBMP;
+				FReadSurfaceDataFlags ReadPixelFlags(RCM_UNorm);
+				ReadPixelFlags.SetLinearToGamma(true);
+
+				RHICmdList.ReadSurfaceData(
+					Context.SrcRenderTarget->GetRenderTargetTexture(),
+					Context.Rect,
+					OutBMP,
+					ReadPixelFlags
+				);
+
+				// 完成后回到游戏线程保存文件并重置标志
+				AsyncTask(ENamedThreads::GameThread, [Context, OutBMP]() {
+					// 使用新的API替代废弃的CompressImageArray
+					// 注意：在UE5.4中，PNGCompressImageArray需要FDefaultAllocator64类型的TArray
+					TArray<uint8, FDefaultAllocator64> CompressedBitmap;
+					FImageUtils::PNGCompressImageArray(Context.Rect.Width(), Context.Rect.Height(), OutBMP, CompressedBitmap);
+
+					// 确保保存成功后再重置标志
+					bool bSaveSuccess = FFileHelper::SaveArrayToFile(CompressedBitmap, *Context.FilePath);
+
+					// 只有在保存成功后才重置标志
+					if (bSaveSuccess && Context.bScreenshotInProgressPtr != nullptr)
+					{
+						*Context.bScreenshotInProgressPtr = false;
+						UE_LOG(LogTemp, Log, TEXT("Screenshot saved: %s"), *Context.FilePath);
+					}
+					else if (!bSaveSuccess)
+					{
+						UE_LOG(LogTemp, Error, TEXT("Failed to save screenshot: %s"), *Context.FilePath);
+					}
+					});
+			});
+	}
+	else
+	{
+		// 如果获取渲染目标资源失败，直接重置标志
+		UE_LOG(LogTemp, Error, TEXT("Failed to get render target resource"));
+		bScreenshotInProgress = false;
+	}
+}
+
+void ADroneActor1::OnCaptureScreenshotWithUI(bool ifWithUI)
+{
+	// 如果截图操作正在进行中，直接返回
+	if (bScreenshotInProgress)
+	{
+		return;
+	}
+
+	bScreenshotInProgress = true; // 设置截图操作正在进行中
+
+	// 获取当前时间并设置文件名和路径
+	FDateTime Now = FDateTime::Now();
+	FString Timestamp = Now.ToString(TEXT("%Y%m%d_%H%M%S"));
+	FString ScreenshotName = FString::Printf(TEXT("Screenshot_%s.png"), *Timestamp);
+	FString SaveDirectory = FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("CapturedImages"));
+	FString FullPath = FPaths::Combine(SaveDirectory, ScreenshotName);
+
+	// 确保目录存在
+	IPlatformFile& PlatformFile = FPlatformFileManager::Get().GetPlatformFile();
+	if (!PlatformFile.DirectoryExists(*SaveDirectory))
+	{
+		bool bCreated = PlatformFile.CreateDirectoryTree(*SaveDirectory);
 		if (!bCreated)
 		{
 			UE_LOG(LogTemp, Error, TEXT("Failed to create directory: %s"), *SaveDirectory);
+			bScreenshotInProgress = false; // 重置标志
+			return;
 		}
 	}
-	FString FullPath = FPaths::Combine(SaveDirectory, ScreenshotName);
 
-	// 请求截图，并启用 UI 捕获
-	FScreenshotRequest::RequestScreenshot(FullPath, ifWithUI, false); // 第二个参数为 `bCaptureUI`
+	// 使用标准回调方式处理截图请求
+	FScreenshotRequest::OnScreenshotRequestProcessed().RemoveAll(this);
+	FScreenshotRequest::OnScreenshotRequestProcessed().AddUObject(this, &ADroneActor1::HandleScreenshotProcessed);
 
-	// 确保截图完成
-	if (FScreenshotRequest::IsScreenshotRequested())
+	// 请求截图
+	FScreenshotRequest::RequestScreenshot(FullPath, ifWithUI, false);
+}
+
+// 新的HandleScreenshotProcessed方法 - 没有参数
+void ADroneActor1::HandleScreenshotProcessed()
+{
+	// 重置标志
+	bScreenshotInProgress = false;
+
+	// 移除回调，避免重复调用
+	FScreenshotRequest::OnScreenshotRequestProcessed().RemoveAll(this);
+}
+
+// 在DroneActor1.cpp中实现
+void ADroneActor1::StartRecording()
+{
+	if (bIsRecording)
+		return;
+
+	// 生成唯一会话ID
+	RecordingSessionID = FGuid::NewGuid().ToString();
+
+	APlayerController* PC = GetWorld()->GetFirstPlayerController();
+	if (PC)
 	{
-		UE_LOG(LogTemp, Log, TEXT("Screenshot with UI requested: %s"), *ScreenshotName);
+		// 设置录制参数
+		FString CaptureCommand = FString::Printf(
+			TEXT("StartMovieCapture highres=true width=%d height=%d fps=60 warmup=0 seq=DroneFlightCapture_%s"),
+			ViewportWidth, ViewportHeight, *RecordingSessionID
+		);
+
+		PC->ConsoleCommand(*CaptureCommand);
+		bIsRecording = true;
+
+		GEngine->AddOnScreenDebugMessage(-1, 5.0f, FColor::Green, TEXT("Recording started"));
 	}
 }
+
+void ADroneActor1::StopRecording()
+{
+	if (!bIsRecording)
+		return;
+
+	APlayerController* PC = GetWorld()->GetFirstPlayerController();
+	if (PC)
+	{
+		PC->ConsoleCommand(TEXT("StopMovieCapture"));
+		bIsRecording = false;
+
+		FString OutputMessage = FString::Printf(TEXT("Recording saved with ID: %s"), *RecordingSessionID);
+		GEngine->AddOnScreenDebugMessage(-1, 5.0f, FColor::Green, *OutputMessage);
+	}
+}
+
+
+
 
 //void ADroneActor1::OnLeftMouseClick()
 //{
@@ -5974,8 +6808,8 @@ void ADroneActor1::OnLeftMouseClick()
 			FVector _ProjectedLocation;
 
 			// 将 Unreal 世界坐标转换为地理坐标	
-            FVector GeoLocation = CesiumGeoreference->TransformUnrealPositionToLongitudeLatitudeHeight(HitLocation);
-            GEngine->AddOnScreenDebugMessage(-1, 5.f, FColor::Blue, FString::Printf(TEXT("Geographic Location: Longitude=%.6f, Latitude=%.6f, Height=%.2f"), GeoLocation.X, GeoLocation.Y, GeoLocation.Z));
+			FVector GeoLocation = CesiumGeoreference->TransformUnrealPositionToLongitudeLatitudeHeight(HitLocation);
+			GEngine->AddOnScreenDebugMessage(-1, 5.f, FColor::Blue, FString::Printf(TEXT("Geographic Location: Longitude=%.6f, Latitude=%.6f, Height=%.2f"), GeoLocation.X, GeoLocation.Y, GeoLocation.Z));
 			UE_LOG(LogTemp, Warning, TEXT("Geographic Location: Longitude=%.6f, Latitude=%.6f, Height=%.2f"), GeoLocation.X, GeoLocation.Y, GeoLocation.Z);
 
 			// 第一次点击：选择顶部的中点
@@ -6042,7 +6876,7 @@ void ADroneActor1::OnLeftMouseClick()
 				NewInterestPoint.Radius = Radius;
 				NewInterestPoint.MinSafetyDistance = 100.0f; // 根据需要设置
 				NewInterestPoint.Height = Height;
-				
+
 
 				InterestPoints.Add(NewInterestPoint);
 

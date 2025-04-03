@@ -297,7 +297,7 @@ public:
 
     virtual bool Initialize();
     //bool RunInference(UTexture2D* InputTexture, FVector2D TrackingPoint);
-    virtual bool RunInference(UTextureRenderTarget2D* RenderTarget, FVector2D TrackingPoint);
+    bool RunInference(UTextureRenderTarget2D* RenderTarget, FVector2D TrackingPoint);
     FVector2D GetTrackedPosition() const;
     //void StartTracking(UTexture2D* InputTexture, FVector2D ClickPosition);
     void StartTracking(UTextureRenderTarget2D* RenderTarget, FVector2D ClickPosition);
@@ -369,7 +369,7 @@ public:
     ~NimaObjectTracker() override {} ;
     NimaObjectTracker(const FString& ModelPath);
 
-    virtual bool Initialize() override;
+    bool Initialize() override;
     bool RunInference(UTextureRenderTarget2D* RenderTarget);
 
 	// 用于获取评分

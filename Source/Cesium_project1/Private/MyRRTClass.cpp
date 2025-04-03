@@ -703,7 +703,9 @@ bool UMyRRTClass::IsTrajectoryCollisionFree(const TArray<FVector>& Trajectory,
 
                     FCollisionQueryParams LocalQueryParams;
                     float SphereRadius = 200.0f; // 设置球体半径
-                    if (World->SweepSingleByChannel(HitResult, SamplePoint, SamplePoint, FQuat::Identity, ECC_WorldDynamic, FCollisionShape::MakeSphere(SphereRadius), LocalQueryParams))
+                    if (World->SweepSingleByChannel(HitResult,
+                        SamplePoint, SamplePoint, FQuat::Identity, 
+                        ECC_WorldDynamic, FCollisionShape::MakeSphere(SphereRadius), LocalQueryParams))
                     {
                         CollisionDetected = true;
                         //UE_LOG(LogTemp, Warning, TEXT("Collision with World detected at point: %s"), *SamplePoint.ToString());
@@ -729,39 +731,103 @@ bool UMyRRTClass::IsTrajectoryCollisionFree(const TArray<FVector>& Trajectory,
 }
 
 
-//TArray<FVector> UMyRRTClass::SmoothAndValidatePath(const TArray<FVector>& Path, const TArray<FCylindricalInterestPoint>& Obstacles, int32 MaxRetries)
-//{
-//    float MaxDeviation = ComputePathLength(Path) * 0.1f;
-//    float CurvatureFactor = 1.0f;
-//
-//    TArray<FVector> SmoothedPath = SmoothPathWithBSplineDynamic(Path, 3, CurvatureFactor);
-//
-//    int32 RetryCount = 0;
-//    while (!IsTrajectoryCollisionFree(SmoothedPath, Obstacles) && RetryCount < MaxRetries)
-//    {
-//        CurvatureFactor *= 0.9f;
-//        SmoothedPath = SmoothPathWithBSplineDynamic(Path, 3, CurvatureFactor);
-//        ++RetryCount;
-//    }
-//
-//    if (!IsTrajectoryCollisionFree(SmoothedPath, Obstacles))
-//    {
-//        return Path;
-//    }
-//
-//    float Deviation = 0.0f;
-//    for (int32 i = 0; i < Path.Num(); ++i)
-//    {
-//        Deviation = FMath::Max(Deviation, FVector::Distance(Path[i], SmoothedPath[i]));
-//    }
-//
-//    if (Deviation > MaxDeviation)
-//    {
-//        return Path;
-//    }
-//
-//    return SmoothedPath;
-//}
+FVector UMyRRTClass::HeuristicSample(
+    const TArray<RRTNode*>& ForwardTree,
+    const TArray<RRTNode*>& BackwardTree,
+    const FBox& SearchSpace,
+    float GoalBiasProb,
+    const FVector& StartLocation,
+    const FVector& EndLocation)
+{
+    // 计算搜索进度
+    float SearchProgress = (float)CurrentIteration / (float)TotalIterations;
+
+    // 动态调整目标偏向概率
+    float AdjustedGoalBiasProb = GoalBiasProb;
+    if (SearchProgress < 0.3f) {
+        // 搜索初期降低目标偏向
+        AdjustedGoalBiasProb *= 0.7f;
+    }
+    else if (SearchProgress > 0.7f) {
+        // 搜索后期提高目标偏向
+        AdjustedGoalBiasProb = FMath::Min(AdjustedGoalBiasProb * 1.5f, 0.5f);
+    }
+    else {
+        // 搜索中期根据成功率调整
+        if (SuccessRate < 0.3f) {
+            AdjustedGoalBiasProb *= 0.8f; // 成功率低时降低目标偏向，增强探索
+        }
+    }
+
+    // 使用动态目标偏向采样
+    if (FMath::FRand() < AdjustedGoalBiasProb) {
+        return EndLocation; // 目标偏向
+    }
+
+    // 计算启发式采样概率
+    float HeuristicProb = 0.4f;
+    if (SuccessRate < 0.3f) {
+        HeuristicProb = 0.6f; // 成功率低时增加启发式采样比例
+    }
+
+    // 在两树之间区域采样 
+    if (FMath::FRand() < HeuristicProb && ForwardTree.Num() > 0 && BackwardTree.Num() > 0) {
+        // 随机选择两棵树中的节点
+        int32 ForwardIdx = FMath::RandRange(0, ForwardTree.Num() - 1);
+        int32 BackwardIdx = FMath::RandRange(0, BackwardTree.Num() - 1);
+
+        FVector ForwardPoint = ForwardTree[ForwardIdx]->Point;
+        FVector BackwardPoint = BackwardTree[BackwardIdx]->Point;
+
+        // 在连线附近随机采样
+        float Alpha = FMath::FRand(); // 随机插值参数
+        FVector MidPoint = FMath::Lerp(ForwardPoint, BackwardPoint, Alpha);
+
+        // 在中点附近添加随机扰动
+        float MaxDeviation = FVector::Distance(ForwardPoint, BackwardPoint) * 0.3f;
+        FVector RandomOffset(
+            FMath::FRandRange(-MaxDeviation, MaxDeviation),
+            FMath::FRandRange(-MaxDeviation, MaxDeviation),
+            FMath::FRandRange(-MaxDeviation, MaxDeviation)
+        );
+
+        return MidPoint + RandomOffset;
+    }
+
+    // 默认随机采样
+    return FMath::RandPointInBox(SearchSpace);
+}
+
+
+double UMyRRTClass::GetAdaptiveConnectThreshold(
+    double BaseThreshold,
+    int32 CurrentIter,
+    int32 MaxIter,
+    float CurrentSuccessRate)
+{
+    // 1. 根据迭代进度调整
+    float ProgressFactor = 1.0f + 0.5f * (static_cast<float>(CurrentIter) / static_cast<float>(MaxIter));
+
+    // 2. 根据成功率调整
+    float SuccessFactor = 1.0f;
+    if (CurrentSuccessRate < 0.2f) {
+        // 成功率低时放宽阈值
+        SuccessFactor = 1.2f;
+    }
+    else if (CurrentSuccessRate > 0.6f) {
+        // 成功率高时收紧阈值
+        SuccessFactor = 0.9f;
+    }
+
+    // 3. 根据上次连接尝试的接近程度调整
+    float DistanceFactor = 1.0f;
+    if (LastConnectDistance < BaseThreshold * 5.0f && LastConnectDistance > BaseThreshold) {
+        // 如果接近但未成功，适当放宽阈值
+        DistanceFactor = 1.1f;
+    }
+
+    return BaseThreshold * ProgressFactor * SuccessFactor * DistanceFactor;
+}
 
 
 RRTNode* UMyRRTClass::ExtendBiRRTTree(TArray<RRTNode*>& ActiveTree, const FVector& Target,
@@ -810,6 +876,9 @@ RRTNode* UMyRRTClass::ExtendBiRRTTree(TArray<RRTNode*>& ActiveTree, const FVecto
     // 添加新节点到树
     ActiveTree.Add(NewNode);
 
+    // 更新成功计数
+    SuccessfulExtensions++;
+
     // 重接邻域内的节点，以优化路径成本
     for (int32 ni : Neighbors)
     {
@@ -825,7 +894,6 @@ RRTNode* UMyRRTClass::ExtendBiRRTTree(TArray<RRTNode*>& ActiveTree, const FVecto
 
     return NewNode;
 }
-
 
 
 TArray<FVector> UMyRRTClass::ExtractPath(RRTNode* ForwardNode, RRTNode* BackwardNode, bool bReverse)
@@ -1195,6 +1263,7 @@ TArray<FVector> UMyRRTClass::FilterPathByMinDistance(const TArray<FVector>& Path
     return FilteredPath;
 }
 
+
 TArray<FVector> UMyRRTClass::MergeSegment(const TArray<FVector>& Segment, float MinDisBetweenPoints)
 {
     TArray<FVector> MergedSegment;
@@ -1242,6 +1311,7 @@ TArray<FVector> UMyRRTClass::MergeSegment(const TArray<FVector>& Segment, float 
 
     return MergedSegment;
 }
+
 
 TArray<FVector> UMyRRTClass::FilterPathByMinDistanceWithCollisionCheck(
     const TArray<FVector>& Path,
@@ -1345,6 +1415,11 @@ TArray<FPathPointWithOrientation> UMyRRTClass::GenerateAndSmoothRRTPath(
     double StepSize,
     double NeighborRadius)
 {
+    // 重置跟踪变量
+    CurrentIteration = 0;
+    SuccessfulExtensions = 0;
+    SuccessRate = 1.0f; // 初始假设成功率高
+
     FBiRRTTree BiRRT;
     FVector LocalStartLocation;
     FVector LocalEndLocation;
@@ -1378,17 +1453,26 @@ TArray<FPathPointWithOrientation> UMyRRTClass::GenerateAndSmoothRRTPath(
     FVector BoxMax = BoundingBox.Max + FVector(Expansion);
     FBox SearchSpace(BoxMin, BoxMax);
 
-    int32 MaxIterations = FMath::Max(10 * FVector::Distance(StartLocation, EndLocation), 50000);
-    float GoalBias = 0.2f;
-    double ConnectThreshold = StepSize * 0.1;
+    // 设置RRT参数
+    TotalIterations = FMath::Max(10 * FVector::Distance(StartLocation, EndLocation), 50000);
+    float BaseGoalBias = 0.2f;
+    double BaseConnectThreshold = StepSize * 0.1;
+    LastConnectDistance = TNumericLimits<float>::Max();
 
     RRTNode* ConnectingForwardNode = nullptr;
     RRTNode* ConnectingBackwardNode = nullptr;
     float BestDistance = TNumericLimits<float>::Max();
 
-    for (int32 Iter = 0; Iter < MaxIterations; ++Iter)
+    for (int32 Iter = 0; Iter < TotalIterations; ++Iter)
     {
-        // 动态调整生长概率
+        CurrentIteration = Iter;
+
+        // 更新成功率
+        if (Iter > 0) {
+            SuccessRate = static_cast<float>(SuccessfulExtensions) / static_cast<float>(Iter);
+        }
+
+        // 计算树平衡概率，倾向于扩展小树
         float ForwardProb = static_cast<float>(BiRRT.BackwardTree.Num()) /
             (BiRRT.ForwardTree.Num() + BiRRT.BackwardTree.Num());
 
@@ -1396,27 +1480,35 @@ TArray<FPathPointWithOrientation> UMyRRTClass::GenerateAndSmoothRRTPath(
         TArray<RRTNode*>& ActiveTree = bGrowForward ? BiRRT.ForwardTree : BiRRT.BackwardTree;
         TArray<RRTNode*>& OtherTree = bGrowForward ? BiRRT.BackwardTree : BiRRT.ForwardTree;
 
-        // 采样新点
-        FVector Target;
-        if (FMath::FRand() < GoalBias)
-        {
-            Target = bGrowForward ? LocalEndLocation : LocalStartLocation;
-        }
-        else
-        {
-            Target = FMath::RandPointInBox(SearchSpace);
-        }
+        // 使用启发式采样
+        FVector Target = HeuristicSample(
+            BiRRT.ForwardTree,
+            BiRRT.BackwardTree,
+            SearchSpace,
+            BaseGoalBias,
+            LocalStartLocation,
+            LocalEndLocation
+        );
 
         // 扩展树
         RRTNode* NewNode = ExtendBiRRTTree(ActiveTree, Target, StepSize, InterestPoints, NeighborRadius);
         if (!NewNode) continue;
 
-        // 修改连接检查逻辑
+        // 自适应连接阈值
+        double CurrentConnectThreshold = GetAdaptiveConnectThreshold(
+            BaseConnectThreshold,
+            Iter,
+            TotalIterations,
+            SuccessRate
+        );
+
+        // 尝试连接
         int32 NearestOtherIdx = NearestNodeIndex(OtherTree, NewNode->Point);
         RRTNode* NearestOther = OtherTree[NearestOtherIdx];
         float Distance = FVector::Distance(NewNode->Point, NearestOther->Point);
+        LastConnectDistance = Distance; // 记录连接尝试距离
 
-        if (Distance < ConnectThreshold &&
+        if (Distance < CurrentConnectThreshold &&
             !LineIntersectsObstacles(NewNode->Point, NearestOther->Point, InterestPoints))
         {
             if (Distance < BestDistance)
@@ -1425,7 +1517,7 @@ TArray<FPathPointWithOrientation> UMyRRTClass::GenerateAndSmoothRRTPath(
                 ConnectingForwardNode = bGrowForward ? NewNode : NearestOther;
                 ConnectingBackwardNode = bGrowForward ? NearestOther : NewNode;
 
-                // 如果距离足够小,直接结束搜索
+                // 如果距离很小，直接结束搜索
                 if (Distance < StepSize * 0.5f)
                 {
                     break;
@@ -1433,7 +1525,7 @@ TArray<FPathPointWithOrientation> UMyRRTClass::GenerateAndSmoothRRTPath(
             }
         }
 
-        // 添加提前终止条件
+        // 周期性检查是否可以结束搜索
         if (Iter % 100 == 0 && ConnectingForwardNode != nullptr)
         {
             if (BestDistance < StepSize)
@@ -1443,9 +1535,9 @@ TArray<FPathPointWithOrientation> UMyRRTClass::GenerateAndSmoothRRTPath(
         }
     }
 
-    // 验证是否找到有效路径
+    // 检查是否找到有效路径
     if (!ConnectingForwardNode || !ConnectingBackwardNode ||
-        BestDistance > ConnectThreshold * 2.0f)
+        BestDistance > BaseConnectThreshold * 2.0f)
     {
         UE_LOG(LogTemp, Warning, TEXT("BiRRT failed to find path (Distance: %f), using backup method"),
             BestDistance);

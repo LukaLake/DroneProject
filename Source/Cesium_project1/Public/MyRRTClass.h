@@ -224,4 +224,31 @@ private:
     TArray<FVector> ExtractPath(RRTNode* ForwardNode, RRTNode* BackwardNode, bool bReverse);
     /*void OptimizeTreeConnection(TArray<RRTNode*>& TreeA, TArray<RRTNode*>& TreeB,
         const TArray<FCylindricalInterestPoint>& Obstacles);*/
+
+
+    // 
+    FVector HeuristicSample(
+        const TArray<RRTNode*>& ForwardTree,
+        const TArray<RRTNode*>& BackwardTree,
+        const FBox& SearchSpace,
+        float GoalBiasProb,
+        const FVector& StartLocation,
+        const FVector& EndLocation);
+
+    double GetAdaptiveConnectThreshold(
+        double BaseThreshold,
+        int32 CurrentIter,
+        int32 MaxIter,
+        float CurrentSuccessRate);
+
+
+    // 搜索状态跟踪
+    int32 TotalIterations;
+    int32 CurrentIteration;
+    float SuccessRate;
+    int32 SuccessfulExtensions;
+
+    // 上一次连接尝试的距离
+    double LastConnectDistance;
+
 };
