@@ -151,6 +151,9 @@ public:
     UFUNCTION(BlueprintCallable, Category = "RRT")
     bool IsTrajectoryCollisionFree(const TArray<FVector>& Trajectory, const TArray<FCylindricalInterestPoint>& Obstacles, float Threshold = 10.0f);
 
+    bool CheckCollisionBatch(UWorld* World, const TArray<FVector>& Points,
+        int32 StartIndex, int32 EndIndex, float Threshold);
+
     /*UFUNCTION(BlueprintCallable, Category = "RRT")
     TArray<FVector> SmoothAndValidatePath(const TArray<FVector>& Path, const TArray<FCylindricalInterestPoint>& Obstacles, int32 MaxRetries = 20);*/
 

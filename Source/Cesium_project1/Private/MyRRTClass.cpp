@@ -603,131 +603,274 @@ bool UMyRRTClass::IsPointInCylinder(const FVector& Point, const FCylindricalInte
 }
 
 
+//bool UMyRRTClass::IsTrajectoryCollisionFree(const TArray<FVector>& Trajectory,
+//    const TArray<FCylindricalInterestPoint>& Obstacles,
+//    float Threshold)
+//{
+//    // 使用 TWeakObjectPtr 安全地引用 World
+//    TWeakObjectPtr<UWorld> WeakWorld = World;
+//
+//    if (!WeakWorld.IsValid())
+//    {
+//        UE_LOG(LogTemp, Warning, TEXT("World is nullptr"));
+//        return false;
+//    }
+//
+//    std::atomic<bool> bCollisionDetected(false);
+//    FCriticalSection WorldMutex; // 用于保护对 World 的访问
+//
+//    // 遍历轨迹段
+//    for (int32 i = 1; i < Trajectory.Num() && !bCollisionDetected.load(); ++i)
+//    {
+//        FVector StartPoint = Trajectory[i - 1];
+//        FVector EndPoint = Trajectory[i];
+//        FVector Segment = EndPoint - StartPoint;
+//        float SegmentLength = Segment.Size();
+//
+//        if (SegmentLength == 0.0f)
+//        {
+//            continue;
+//        }
+//
+//        int32 NumSteps = FMath::CeilToInt(SegmentLength / Threshold);
+//
+//        // 存储采样点
+//        TArray<FVector> SamplePoints;
+//        SamplePoints.Reserve(NumSteps + 1);
+//
+//        // 使用 ParallelFor 生成采样点并检测圆柱体碰撞
+//        ParallelFor(NumSteps + 1, [&](int32 Step)
+//            {
+//                if (bCollisionDetected.load())
+//                {
+//                    return;
+//                }
+//
+//                float t = static_cast<float>(Step) / static_cast<float>(NumSteps);
+//                FVector SamplePoint = FMath::Lerp(StartPoint, EndPoint, t);
+//
+//                // 检查与圆柱体的碰撞
+//                for (const FCylindricalInterestPoint& Obstacle : Obstacles)
+//                {
+//                    if (IsPointInCylinder(SamplePoint, Obstacle))
+//                    {
+//                        bCollisionDetected.store(true);
+//                        UE_LOG(LogTemp, Warning, TEXT("Collision with Cylinder Detected"));
+//                        return;
+//                    }
+//                }
+//
+//                // 将采样点加入列表
+//                SamplePoints.Add(SamplePoint);
+//            });
+//
+//        // 如果在并行过程中检测到圆柱体碰撞，则提前退出
+//        if (bCollisionDetected.load())
+//        {
+//            UE_LOG(LogTemp, Warning, TEXT("Collision detected during parallel processing."));
+//            return false;
+//        }
+//
+//        // 批量调度物理碰撞检测到主线程
+//        TSharedRef<TPromise<bool>> Promise = MakeShared<TPromise<bool>>();
+//        TFuture<bool> Future = Promise->GetFuture();
+//
+//        AsyncTask(ENamedThreads::GameThread, [WeakWorld, Promise, SamplePoints, Threshold, &WorldMutex]() mutable
+//            {
+//                bool CollisionDetected = false;
+//
+//                // 使用 FScopeLock 保护对 World 的访问
+//                FScopeLock Lock(&WorldMutex);
+//
+//                if (!WeakWorld.IsValid())
+//                {
+//                    UE_LOG(LogTemp, Error, TEXT("World is no longer valid in AsyncTask"));
+//                    Promise->SetValue(false); // 如果 World 无效，直接返回 false
+//                    return;
+//                }
+//
+//                UWorld* World = WeakWorld.Get();
+//                for (const FVector& SamplePoint : SamplePoints)
+//                {
+//                    if (CollisionDetected)
+//                    {
+//                        break;
+//                    }
+//
+//                    FHitResult HitResult;
+//                    FVector TraceStart = SamplePoint - FVector(1.0f, 1.0f, 1.0f) * Threshold;
+//                    FVector TraceEnd = SamplePoint + FVector(1.0f, 1.0f, 1.0f) * Threshold;
+//
+//                    FCollisionQueryParams LocalQueryParams;
+//                    float SphereRadius = 200.0f; // 设置球体半径
+//                    if (World->SweepSingleByChannel(HitResult,
+//                        SamplePoint, SamplePoint, FQuat::Identity, 
+//                        ECC_WorldDynamic, FCollisionShape::MakeSphere(SphereRadius), LocalQueryParams))
+//                    {
+//                        CollisionDetected = true;
+//                        //UE_LOG(LogTemp, Warning, TEXT("Collision with World detected at point: %s"), *SamplePoint.ToString());
+//                        break;
+//                    }
+//                }
+//
+//                Promise->SetValue(CollisionDetected);
+//            });
+//
+//        // 在后台线程等待主线程任务完成
+//		bool bCollisionDetectedInSegment = Future.Get();
+//        bCollisionDetected.store(bCollisionDetectedInSegment);
+//
+//        if (bCollisionDetected.load())
+//        {
+//            //UE_LOG(LogTemp, Warning, TEXT("Some kind of collision detected."));
+//            return false;
+//        }
+//    }
+//
+//    return !bCollisionDetected.load();
+//}
+
+
 bool UMyRRTClass::IsTrajectoryCollisionFree(const TArray<FVector>& Trajectory,
     const TArray<FCylindricalInterestPoint>& Obstacles,
     float Threshold)
 {
     // 使用 TWeakObjectPtr 安全地引用 World
     TWeakObjectPtr<UWorld> WeakWorld = World;
-
     if (!WeakWorld.IsValid())
     {
         UE_LOG(LogTemp, Warning, TEXT("World is nullptr"));
         return false;
     }
 
-    std::atomic<bool> bCollisionDetected(false);
-    FCriticalSection WorldMutex; // 用于保护对 World 的访问
-
-    // 遍历轨迹段
-    for (int32 i = 1; i < Trajectory.Num() && !bCollisionDetected.load(); ++i)
+    // 1. 首先执行快速的几何碰撞检测（基于圆柱体的）
+    for (int32 i = 1; i < Trajectory.Num(); ++i)
     {
         FVector StartPoint = Trajectory[i - 1];
         FVector EndPoint = Trajectory[i];
-        FVector Segment = EndPoint - StartPoint;
-        float SegmentLength = Segment.Size();
 
-        if (SegmentLength == 0.0f)
+        // 检查端点是否在障碍物内
+        for (const FCylindricalInterestPoint& Obstacle : Obstacles)
         {
-            continue;
+            if (IsPointInCylinder(StartPoint, Obstacle) || IsPointInCylinder(EndPoint, Obstacle))
+            {
+                return false; // 轨迹点在障碍物内，碰撞失败
+            }
         }
 
-        int32 NumSteps = FMath::CeilToInt(SegmentLength / Threshold);
-
-        // 存储采样点
-        TArray<FVector> SamplePoints;
-        SamplePoints.Reserve(NumSteps + 1);
-
-        // 使用 ParallelFor 生成采样点并检测圆柱体碰撞
-        ParallelFor(NumSteps + 1, [&](int32 Step)
-            {
-                if (bCollisionDetected.load())
-                {
-                    return;
-                }
-
-                float t = static_cast<float>(Step) / static_cast<float>(NumSteps);
-                FVector SamplePoint = FMath::Lerp(StartPoint, EndPoint, t);
-
-                // 检查与圆柱体的碰撞
-                for (const FCylindricalInterestPoint& Obstacle : Obstacles)
-                {
-                    if (IsPointInCylinder(SamplePoint, Obstacle))
-                    {
-                        bCollisionDetected.store(true);
-                        UE_LOG(LogTemp, Warning, TEXT("Collision with Cylinder Detected"));
-                        return;
-                    }
-                }
-
-                // 将采样点加入列表
-                SamplePoints.Add(SamplePoint);
-            });
-
-        // 如果在并行过程中检测到圆柱体碰撞，则提前退出
-        if (bCollisionDetected.load())
+        // 检查线段与圆柱体的相交情况
+        for (const FCylindricalInterestPoint& Obstacle : Obstacles)
         {
-            UE_LOG(LogTemp, Warning, TEXT("Collision detected during parallel processing."));
-            return false;
-        }
-
-        // 批量调度物理碰撞检测到主线程
-        TSharedRef<TPromise<bool>> Promise = MakeShared<TPromise<bool>>();
-        TFuture<bool> Future = Promise->GetFuture();
-
-        AsyncTask(ENamedThreads::GameThread, [WeakWorld, Promise, SamplePoints, Threshold, &WorldMutex]() mutable
+            float MinDist = ComputeLineObstacleDistance(StartPoint, EndPoint, Obstacle);
+            if (MinDist <= (Obstacle.Radius + Threshold))
             {
-                bool CollisionDetected = false;
-
-                // 使用 FScopeLock 保护对 World 的访问
-                FScopeLock Lock(&WorldMutex);
-
-                if (!WeakWorld.IsValid())
-                {
-                    UE_LOG(LogTemp, Error, TEXT("World is no longer valid in AsyncTask"));
-                    Promise->SetValue(false); // 如果 World 无效，直接返回 false
-                    return;
-                }
-
-                UWorld* World = WeakWorld.Get();
-                for (const FVector& SamplePoint : SamplePoints)
-                {
-                    if (CollisionDetected)
-                    {
-                        break;
-                    }
-
-                    FHitResult HitResult;
-                    FVector TraceStart = SamplePoint - FVector(1.0f, 1.0f, 1.0f) * Threshold;
-                    FVector TraceEnd = SamplePoint + FVector(1.0f, 1.0f, 1.0f) * Threshold;
-
-                    FCollisionQueryParams LocalQueryParams;
-                    float SphereRadius = 200.0f; // 设置球体半径
-                    if (World->SweepSingleByChannel(HitResult,
-                        SamplePoint, SamplePoint, FQuat::Identity, 
-                        ECC_WorldDynamic, FCollisionShape::MakeSphere(SphereRadius), LocalQueryParams))
-                    {
-                        CollisionDetected = true;
-                        //UE_LOG(LogTemp, Warning, TEXT("Collision with World detected at point: %s"), *SamplePoint.ToString());
-                        break;
-                    }
-                }
-
-                Promise->SetValue(CollisionDetected);
-            });
-
-        // 在后台线程等待主线程任务完成
-		bool bCollisionDetectedInSegment = Future.Get();
-        bCollisionDetected.store(bCollisionDetectedInSegment);
-
-        if (bCollisionDetected.load())
-        {
-            //UE_LOG(LogTemp, Warning, TEXT("Some kind of collision detected."));
-            return false;
+                return false; // 线段与圆柱体相交，碰撞失败
+            }
         }
     }
 
-    return !bCollisionDetected.load();
+    // 2. 物理碰撞检测需要在游戏线程上执行，但我们需要避免递归调用FlushRenderingCommands
+    // 使用一个标志来同步异步操作的结果
+    bool bResult = true;
+    FThreadSafeBool bResultReady = false;
+
+    // 准备批次采样点
+    TArray<FVector> AllSamplePoints;
+    for (int32 i = 1; i < Trajectory.Num(); ++i)
+    {
+        FVector StartPoint = Trajectory[i - 1];
+        FVector EndPoint = Trajectory[i];
+        float SegmentLength = FVector::Dist(StartPoint, EndPoint);
+
+        if (SegmentLength < KINDA_SMALL_NUMBER)
+            continue;
+
+        // 使用自适应采样密度
+        int32 NumSteps = FMath::CeilToInt(SegmentLength / Threshold);
+        NumSteps = FMath::Clamp(NumSteps, 1, 20); // 限制采样点数量
+
+        for (int32 Step = 0; Step <= NumSteps; ++Step)
+        {
+            float t = static_cast<float>(Step) / static_cast<float>(NumSteps);
+            FVector SamplePoint = FMath::Lerp(StartPoint, EndPoint, t);
+            AllSamplePoints.Add(SamplePoint);
+        }
+    }
+
+    // 在游戏线程上执行碰撞检测，但不等待结果
+    AsyncTask(ENamedThreads::GameThread, [WeakWorld, AllSamplePoints, Threshold, &bResult, &bResultReady]()
+        {
+            if (!WeakWorld.IsValid())
+            {
+                bResult = false;
+                bResultReady = true;
+                return;
+            }
+
+            UWorld* LocalWorld = WeakWorld.Get();
+
+            // 批量处理碰撞检测
+            const int32 BatchSize = 20;
+            const int32 NumBatches = FMath::CeilToInt(AllSamplePoints.Num() / static_cast<float>(BatchSize));
+
+            bool bCollisionDetected = false;
+
+            for (int32 BatchIndex = 0; BatchIndex < NumBatches && !bCollisionDetected; ++BatchIndex)
+            {
+                int32 StartIndex = BatchIndex * BatchSize;
+                int32 EndIndex = FMath::Min((BatchIndex + 1) * BatchSize, AllSamplePoints.Num());
+
+                for (int32 i = StartIndex; i < EndIndex && !bCollisionDetected; ++i)
+                {
+                    const FVector& SamplePoint = AllSamplePoints[i];
+
+                    FHitResult HitResult;
+                    FCollisionQueryParams QueryParams;
+
+                    float SphereRadius = FMath::Min(200.0f, Threshold * 2.0f);
+
+                    if (LocalWorld->SweepSingleByChannel(
+                        HitResult,
+                        SamplePoint,
+                        SamplePoint, // 相同的起点和终点表示静态检查
+                        FQuat::Identity,
+                        ECC_WorldDynamic,
+                        FCollisionShape::MakeSphere(SphereRadius),
+                        QueryParams))
+                    {
+                        bCollisionDetected = true;
+                        break;
+                    }
+                }
+            }
+
+            bResult = !bCollisionDetected;
+            bResultReady = true;
+        });
+
+    // 3. 如果调用者不需要立即结果，可以设置一个回调而不是等待
+    // 但对于这个函数，我们需要同步等待结果
+    // 重要：使用一个轻量级的轮询而不是阻塞等待，避免递归FlushRenderingCommands
+
+    // 轮询等待结果，最多等待5秒
+    const float MaxWaitTime = 5.0f;
+    float ElapsedTime = 0.0f;
+    const float SleepInterval = 0.001f;
+
+    while (!bResultReady && ElapsedTime < MaxWaitTime)
+    {
+        FPlatformProcess::Sleep(SleepInterval);
+        ElapsedTime += SleepInterval;
+    }
+
+    if (!bResultReady)
+    {
+        // 超时，保守地返回碰撞
+        UE_LOG(LogTemp, Warning, TEXT("Collision check timed out after %f seconds"), MaxWaitTime);
+        return false;
+    }
+
+    return bResult;
 }
 
 

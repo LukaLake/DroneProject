@@ -8,8 +8,12 @@ public class Cesium_project1 : ModuleRules
     {
         PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
 
-        PublicDependencyModuleNames.AddRange(new string[] { "Core", "CoreUObject", "Engine", "InputCore","RenderCore","UMG","OpenCV","OpenCVHelper",
-        "CesiumRuntime","HeadMountedDisplay", "EnhancedInput", "NNE","NNERuntimeORT" });
+        PublicDependencyModuleNames.AddRange(new string[] { "Core", "CoreUObject", "Engine", "InputCore","RenderCore","UMG",
+            "RHI", // 添加 RHI 模块
+            "MovieSceneTools","MovieSceneCapture", // 添加 MovieScene 模块
+            "OpenCV","OpenCVHelper",
+        "CesiumRuntime",
+            "HeadMountedDisplay", "EnhancedInput", "NNE","NNERuntimeORT" });
 
         //// 设置包含目录的相对路径
         //string IncludeDirectory = Path.Combine(ModuleDirectory, "..", "..", "packages", "Microsoft.ML.OnnxRuntime.Gpu.1.16.3", "build", "native", "include");

@@ -9,6 +9,7 @@
 #include "Camera/CameraComponent.h"
 #include "GameFramework/FloatingPawnMovement.h"
 #include <Components/SceneCaptureComponent2D.h>
+#include "MovieSceneCapture.h"
 #include "Components/SplineComponent.h"
 #include "Components/SplineMeshComponent.h"
 #include "CesiumGlobeAnchorComponent.h"
@@ -169,6 +170,9 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Flight")
     bool bIsSavePhotos;
 
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Flight")
+    bool bIsSaveImageForPrediction;
+
     // 输入参数
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Input")
     float MouseSensitivity;
@@ -182,6 +186,10 @@ public:
 
     // NIMA模型
     TSharedPtr<NimaObjectTracker> NimaTracker;
+
+    // 模型选择
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Model")
+	FString ModelPath;
 
     // RRT类
     UPROPERTY()
@@ -201,6 +209,10 @@ public:
     //====================================================================================
     // 基础工具函数
     //====================================================================================
+
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
+
+    virtual void BeginDestroy() override;
 
     // 获取视口大小
     bool GetViewportSize(int32& OutWidth, int32& OutHeight);
@@ -314,7 +326,8 @@ public:
     void GenerateViewpointGroups(
         const TArray<FPathPointWithOrientation>& Viewpoints,
         int32 GroupSize,
-        TArray<TArray<FPathPointWithOrientation>>& OutViewpointGroups);
+        TArray<TArray<FPathPointWithOrientation>>& OutViewpointGroups,
+        int32 MaxCombinations = 400);
 
     // 组合生成辅助函数
     void GenerateCombinationsHelper(
@@ -564,6 +577,17 @@ public:
     void ShowPathPoints();
     void DestroyPathPoints();
 
+	// ======================================================================================
+    // 手动记录路径点的函数
+    UFUNCTION(BlueprintCallable, Category = "Drone|Path")
+    void ToggleManualPathRecording();
+
+    UFUNCTION(BlueprintCallable, Category = "Drone|Path")
+    void RecordCurrentPositionAsPathPoint();
+
+    UFUNCTION(BlueprintCallable, Category = "Drone|Path")
+    void FinishManualPathRecording();
+
     //====================================================================================
     // 文件操作与其他工具函数
     //====================================================================================
@@ -581,6 +605,11 @@ public:
     // 新增回调处理函数
     void HandleScreenshotProcessed();
     void CaptureScreenshotLowOverhead(bool ifWithUI);
+
+	// 视频录制
+	void OnRecordVideo();
+    UPROPERTY(Transient)
+    UMovieSceneCapture* MovieSceneCaptureInstance;
 
     UFUNCTION(BlueprintCallable, Category = "Recording")
     void StartRecording();
@@ -684,7 +713,11 @@ private:
     const float ScreenshotCooldown = 0.2f; // 截图冷却时间（秒）
     bool bScreenshotInProgress = false;
 
+    // 视频录制相关
     bool bIsRecording = false;
+    // 录制完成回调
+    void OnRecordingFinished();
+
     FString RecordingSessionID;
 
     //====================================================================================
@@ -720,6 +753,19 @@ private:
 
     // 互斥锁
     FCriticalSection PathMutex;
+
+
+
+	// ====================================================================================
+    // 手动记录的路径点集合
+    TArray<FPathPointWithOrientation> ManualPathPoints;
+
+    // 是否处于手动记录路径点模式
+    bool bIsManualRecordingPath;
+
+    // 记录点的最小间隔时间(秒)，防止重复记录
+    float ManualRecordCooldown;
+    float LastRecordTime;
 };
 
 // 异步任务类定义

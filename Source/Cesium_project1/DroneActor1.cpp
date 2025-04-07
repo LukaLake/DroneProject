@@ -1,17 +1,30 @@
 // Fill out your copyright notice in the Description page of Project Settings.
 
+// CoreMinimal 等核心头文件
+#include "DroneActor1.h"
+
 // 标准库头文件放在最前面
 #include <algorithm>
 #include <string>
-
-// CoreMinimal 等核心头文件
-#include "DroneActor1.h"
 
 // 引擎核心功能头文件分组
 #include "HAL/PlatformTime.h"
 #include "ImageUtils.h"
 #include "Kismet/GameplayStatics.h"
 #include "Misc/DateTime.h"
+
+
+#include "MovieSceneCapture.h"
+#include "LevelSequenceActor.h"
+#include "LevelSequencePlayer.h"
+#include "MovieSceneCaptureSettings.h"
+#include "Slate/SceneViewport.h"
+#include "MovieSceneCaptureEnvironment.h"
+#include "MovieSceneCaptureProtocolBase.h"
+#include "Engine/World.h"
+#include "Engine/GameViewportClient.h"
+#include "Misc/Paths.h"
+
 
 // 渲染相关头文件分组
 #include "HighResScreenshot.h"
@@ -69,6 +82,16 @@ ADroneActor1::ADroneActor1()
 	bIsShowGlobalPath = true;
 	bIsShowLocalOriginalPath = false;
 	bIsSavePhotos = false;
+	bIsSaveImageForPrediction = false;
+
+	bScreenshotInProgress = false;
+
+	// 确保初始化为空和false
+	MovieSceneCaptureInstance = nullptr;
+	bIsRecording = false;
+
+	// 默认模型
+	ModelPath = TEXT("/Models/light_nima.light_nima");
 
 	SpeedMultiplier = 30.0f;
 
@@ -157,6 +180,7 @@ void ADroneActor1::BeginPlay()
 	for (TActorIterator<ACesiumGeoreference> It(GetWorld()); It; ++It)
 	{
 		CesiumGeoreference = *It;
+
 		break;
 	}
 	if (!CesiumGeoreference)
@@ -286,7 +310,7 @@ void ADroneActor1::BeginPlay()
 	// ------------------- YOLO 模型加载 -------------------
 	// Specify the local path to your YOLO model file
 	// 无法直接引入ONNX文件，依然需要先导入为Asset，然后获取路径
-	ModelPath_Yolo = FPaths::Combine(TEXT("Game"), TEXT("/Models/yolov11m-seg.yolov11m-seg"));
+	ModelPath_Yolo = FPaths::Combine(TEXT("Game"), ModelPath); // 使用更轻量化的模型
 
 	//ModelPath = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir() + TEXT("Resources")+TEXT("/pretrain_model/yolov8s.onnx"));
 
@@ -305,11 +329,96 @@ void ADroneActor1::BeginPlay()
 	}*/
 
 	// ------------------- NIMA 模型加载 -------------------
-	ModelPath_Nima = FPaths::Combine(TEXT("Game"), TEXT("/Models/relic2_model.relic2_model"));
+	ModelPath_Nima = FPaths::Combine(TEXT("Game"), TEXT("/Models/light_nima.light_nima")); // 使用更轻量化的模型
 
 	NimaTracker = MakeShared<NimaObjectTracker>(ModelPath_Nima);
 }
 
+void ADroneActor1::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	Super::EndPlay(EndPlayReason);
+	// 取消所有计时器
+	if (UWorld* World = GetWorld())
+	{
+		World->GetTimerManager().ClearTimer(ProgressCheckTimerHandle);
+		World->GetTimerManager().ClearTimer(TraditionalOrbitTimerHandle);
+		World->GetTimerManager().ClearTimer(ScreenshotTimerHandle);
+	}
+	// 解除所有事件绑定
+	UnbindPathGenerationEvents();
+	FScreenshotRequest::OnScreenshotRequestProcessed().RemoveAll(this);
+	if (MovieSceneCaptureInstance)
+	{
+		try
+		{
+			MovieSceneCaptureInstance->Finalize();
+			MovieSceneCaptureInstance->OnCaptureFinished().RemoveAll(this);
+			MovieSceneCaptureInstance = nullptr;
+		}
+		catch (...)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("Exception during MovieSceneCapture cleanup"));
+		}
+		bIsRecording = false;
+	}
+	if (YoloTracker)
+	{
+		if (bIsTrackingActive)
+		{
+			YoloTracker->StopTracking();
+			bIsTrackingActive = false;
+		}
+		YoloTracker.Reset();
+	}
+	if (NimaTracker)
+	{
+		NimaTracker.Reset();
+	}
+}
+
+void ADroneActor1::BeginDestroy()
+{
+
+	// 首先调用基类的BeginDestroy
+	Super::BeginDestroy();
+
+	// 清除引用
+	PlayerController = nullptr;
+	CesiumGeoreference = nullptr;
+
+	// 释放全局数据结构
+	GlobalPathPoints.Empty();
+	InterestPoints.Empty();
+	InterestAreas.Empty();
+	TestPathPoints.Empty();
+	GlobalBestSplinePoints.Empty();
+	GlobalBestKeyPoints.Empty();
+	GlobalBestControlPoints.Empty();
+	GlobalBestViewPoints.Empty();
+	ManualPathPoints.Empty();
+	LinkRoutes.Empty();
+	GlobalFlightDurations.Empty();
+
+	// 等待任何可能的异步操作完成
+	FlushRenderingCommands();
+
+	// 如果有悬挂的RenderTarget，确保释放
+	if (RenderTarget)
+	{
+		RenderTarget->ReleaseResource();
+		RenderTarget = nullptr;
+	}
+
+	// 释放RRTClass
+	if (GlobalRRTClass)
+	{
+		// 确保不再引用World
+		GlobalRRTClass->SetWorld(nullptr);
+		GlobalRRTClass = nullptr;
+	}
+
+	UE_LOG(LogTemp, Warning, TEXT("ADroneActor1::BeginDestroy completed"));
+}
 
 bool ADroneActor1::GetViewportSize(int32& OutWidth, int32& OutHeight)
 {
@@ -379,7 +488,7 @@ void ADroneActor1::PrecomputeAllDuration()
 		float DistanceToTarget = FVector::Dist(localOriginalPathPoint.Point, GlobalPathPoints[i].Point);
 
 		// 计算旋转所需时间，基于转角大小和期望旋转速度
-		float RotationSpeedDegreesPerSecond = 45.0f; // 每秒旋转多少度
+		float RotationSpeedDegreesPerSecond = 25.0f; // 每秒旋转多少度
 		float MinRotationDuration = MaxAngleDiff / RotationSpeedDegreesPerSecond;
 
 		// 计算当前段的期望速度
@@ -477,7 +586,7 @@ void ADroneActor1::StartNewPathPoint()
 	// 截图功能改为定时执行，避免每个路径点都立即截图
 	if (bIsSavePhotos && !bScreenshotInProgress)
 	{
-		bScreenshotInProgress = true;
+		bScreenshotInProgress = false;
 		GetWorld()->GetTimerManager().SetTimer(
 			ScreenshotTimerHandle,
 			FTimerDelegate::CreateUObject(this, &ADroneActor1::OnCaptureScreenshotWithUI, false),
@@ -886,6 +995,9 @@ void ADroneActor1::SetupPlayerInputComponent(UInputComponent* PlayerInputCompone
 {
 	Super::SetupPlayerInputComponent(PlayerInputComponent);
 
+	// 清除之前的所有绑定，以避免潜在的冲突
+	PlayerInputComponent->ClearActionBindings();
+
 	PlayerInputComponent->BindAction("LeftMouseClick", IE_Pressed, this, &ADroneActor1::OnLeftMouseClick);
 
 	PlayerInputComponent->BindAction("Track_Yolo", IE_Pressed, this, &ADroneActor1::OnStartTracking);
@@ -895,6 +1007,14 @@ void ADroneActor1::SetupPlayerInputComponent(UInputComponent* PlayerInputCompone
 
 	PlayerInputComponent->BindAction("StartGeneratePath", IE_Pressed, this, &ADroneActor1::OnGenerateOrbitFlightPath);
 	PlayerInputComponent->BindAction("Inference_Relic", IE_Pressed, this, &ADroneActor1::OnPredictAction);
+
+	// 添加手动路径记录相关按键绑定
+	PlayerInputComponent->BindAction("ToggleManualPathRecording", IE_Pressed, this, &ADroneActor1::ToggleManualPathRecording);
+	PlayerInputComponent->BindAction("RecordPathPoint", IE_Pressed, this, &ADroneActor1::RecordCurrentPositionAsPathPoint);
+
+
+	// 录制视频
+	PlayerInputComponent->BindAction("RecordVideo", IE_Pressed, this, &ADroneActor1::OnRecordVideo);
 
 	// 绑定读取路径文件按键
 	PlayerInputComponent->BindAction("ReadPathFromFile", IE_Pressed, this, &ADroneActor1::OnReadPathFromFile);
@@ -1196,8 +1316,9 @@ void ADroneActor1::AdjustFOVBasedOnDistanceAndHeight(FPathPointWithOrientation& 
 void ADroneActor1::GenerateTraditionalOrbitPath_Internal()
 {
 	// 清空现有路径点
-	FScopeLock Lock(&PathMutex); // 使用互斥锁保护全局变量
+	FScopeLock Lock(&PathMutex);
 	GlobalPathPoints.Empty();
+	InterestAreas.Empty(); // 清空兴趣区域，准备重新填充
 
 	// 确保至少有一个兴趣区域
 	if (InterestPoints.Num() == 0)
@@ -1214,7 +1335,7 @@ void ADroneActor1::GenerateTraditionalOrbitPath_Internal()
 		OnPathGenerationProgress.Broadcast(0.0f, TEXT("开始生成智能环绕路径..."));
 		});
 
-	// 处理每个兴趣区域
+	// 处理每个兴趣区域，生成单独的环绕路径
 	for (int32 AOIIndex = 0; AOIIndex < InterestPoints.Num(); ++AOIIndex)
 	{
 		// 更新进度
@@ -1229,127 +1350,171 @@ void ADroneActor1::GenerateTraditionalOrbitPath_Internal()
 		// 获取当前兴趣区域
 		const FCylindricalInterestPoint& InterestPoint = InterestPoints[AOIIndex];
 
-		// 明确单位定义
-		const float MeterToUnrealUnit = 100.0f;  // 1米 = 100虚幻单位(厘米)
-
-		// 计算视场角（FOV）和纵横比
-		const float CameraFOV = CameraComponent->FieldOfView;
-
-		// 使用精确的轨道参数计算
+		// 计算视场角（FOV）和轨道参数
 		float OrbitRadius, OrbitRadius1, OrbitRadius2, MinHeight, MaxHeight;
 		CalculateOrbitParameters(InterestPoint, OrbitRadius, OrbitRadius1, OrbitRadius2, MinHeight, MaxHeight);
 
-		// 使用单一基准半径，后续会根据障碍物调整
-		float BaseRadius = OrbitRadius;
+		// 创建当前兴趣区域的区域结构
+		FInterestArea CurrentInterestArea;
 
-		// 螺旋路径参数设置
-		const float HeightPerTurn = 800.0f;  // 每圈旋转时的高度增量(厘米) = 8米
+		// 获取目标尺寸参数
+		float ObjectSize = FMath::Max(InterestPoint.Radius, InterestPoint.Height);
 		float TotalHeight = MaxHeight - MinHeight;
-		int32 NumTurns = FMath::CeilToInt(TotalHeight / HeightPerTurn);
-		float TotalAngle = 360.0f * NumTurns;
-		float HeightIncrement = TotalHeight / TotalAngle;
+
+		// 限制最大环绕角度为360度
+		const float MaxRotationAngle = 360.0f;
+
+		// 定义半径变化范围
+		float MinRadius = OrbitRadius * 0.85f;
+		float MaxRadius = OrbitRadius * 1.15f;
+
+		// 动态计算螺旋点的数量和角度增量
+		int32 NumPointsPerCircle = CalculatePointsForOrbitRadius(OrbitRadius);
+		float AngleIncrement = MaxRotationAngle / NumPointsPerCircle;
+
+		// 计算高度增量
+		float HeightIncrement = TotalHeight / MaxRotationAngle;
 
 		// 报告配置完成
 		AsyncTask(ENamedThreads::GameThread, [this]() {
 			OnPathGenerationProgress.Broadcast(20.0f, TEXT("配置参数完成，开始生成路径点..."));
 			});
 
-		// 生成点集
-		TArray<FPathPointWithOrientation> CandidatePoints;
-
-		// 为单一半径计算合适的点数
-		int32 PointsPerCircle = CalculatePointsForOrbitRadius(BaseRadius);
-		float AngleIncrementD = 360.0f / PointsPerCircle;
-
-		// 生成螺旋路径 - 使用连续的螺旋线而不是多个圆圈
+		// 生成带有半径渐变的环绕轨迹
+		TArray<FPathPointWithOrientation> OrbitPoints;
 		float CurrentAngle = 0.0f;
 		float CurrentHeight = MinHeight;
 
-		while (CurrentHeight < MaxHeight)
+		// 为俯视点预留位置
+		bool bIncludeOverviewPoint = (TotalHeight > 0);
+		FPathPointWithOrientation OverviewPoint;
+
+		// 生成主环绕轨迹
+		while (CurrentAngle < MaxRotationAngle)
 		{
-			// 更新进度
-			float ProgressPercent = 20.0f + (CurrentHeight - MinHeight) / TotalHeight * 40.0f;
-			AsyncTask(ENamedThreads::GameThread, [this, ProgressPercent]() {
-				OnPathGenerationProgress.Broadcast(
-					ProgressPercent,
-					TEXT("生成螺旋路径点...")
-				);
-				});
+			// 使用正弦函数创建半径的渐变
+			float NormalizedAngle = CurrentAngle / MaxRotationAngle;
+			float RadiusRatio = 0.5f * (1.0f + FMath::Sin(NormalizedAngle * 2.0f * PI - PI / 2));
+			float CurrentRadius = FMath::Lerp(MinRadius, MaxRadius, RadiusRatio);
 
 			// 计算当前点的位置
 			FVector Position(
-				InterestPoint.Center.X + BaseRadius * FMath::Cos(FMath::DegreesToRadians(CurrentAngle)),
-				InterestPoint.Center.Y + BaseRadius * FMath::Sin(FMath::DegreesToRadians(CurrentAngle)),
+				InterestPoint.Center.X + CurrentRadius * FMath::Cos(FMath::DegreesToRadians(CurrentAngle)),
+				InterestPoint.Center.Y + CurrentRadius * FMath::Sin(FMath::DegreesToRadians(CurrentAngle)),
 				CurrentHeight
 			);
-
-			// 朝向始终指向兴趣点中心
-			FVector DirectionToCenter = InterestPoint.Center - Position;
-			FRotator Orientation = DirectionToCenter.Rotation();
 
 			// 创建路径点
 			FPathPointWithOrientation PathPoint;
 			PathPoint.Point = Position;
-			PathPoint.Orientation = Orientation;
-			PathPoint.FOV = CameraFOV;  // 初始使用相机默认FOV
+			PathPoint.Orientation = (InterestPoint.Center - Position).Rotation();
+			PathPoint.FOV = CameraComponent->FieldOfView;
 			PathPoint.AOIIndex = AOIIndex;
 
 			// 根据距离和高度动态调整视场角
-			AdjustFOVBasedOnDistanceAndHeight(PathPoint, InterestPoint, BaseRadius, CurrentHeight - InterestPoint.BottomCenter.Z);
-
-			// 检查并调整路径点，避开障碍物
+			AdjustFOVBasedOnDistanceAndHeight(PathPoint, InterestPoint, CurrentRadius, CurrentHeight - InterestPoint.BottomCenter.Z);
 			AdjustPathPointForObstacles(PathPoint, InterestPoint);
 
-			// 添加到候选点
-			CandidatePoints.Add(PathPoint);
+			// 添加到路径点数组
+			OrbitPoints.Add(PathPoint);
 
-			// 递增角度和高度
-			CurrentAngle += AngleIncrementD;
-			CurrentHeight += HeightIncrement * AngleIncrementD;
+			// 增加角度和高度
+			CurrentAngle += AngleIncrement;
+			CurrentHeight += HeightIncrement * AngleIncrement;
 		}
 
-		// 报告点生成完成，开始美学评分
-		AsyncTask(ENamedThreads::GameThread, [this]() {
-			OnPathGenerationProgress.Broadcast(60.0f, TEXT("路径点生成完成，开始计算美学评分..."));
-			});
-
-		// 异步计算美学评分和覆盖度
-		if (NimaTracker)
+		// 添加俯视点
+		if (bIncludeOverviewPoint)
 		{
-			Force3DTilesLoad(); // 强制加载3D Tiles以获得更准确的渲染
+			// 获取环形路径的最后一个点的位置和方向
+			FVector LastPoint = OrbitPoints.Last().Point;
+			FVector LastDirection = OrbitPoints.Last().Point - OrbitPoints[OrbitPoints.Num() - 2].Point;
+			LastDirection.Z = 0; // 只考虑水平方向
+			LastDirection.Normalize();
 
-			int32 TotalPoints = CandidatePoints.Num();
+			// 计算一个与最后方向一致的角度
+			float FinalAngle = FMath::RadiansToDegrees(FMath::Atan2(LastDirection.Y, LastDirection.X));
+
+			// 高度略高于主轨道最高点
+			float TopViewHeight = MaxHeight + ObjectSize * 0.3f;
+
+			// 半径稍微靠内一点，但保持方向一致
+			float TopViewRadius = MaxRadius * 0.9f;
+
+			// 计算俯视点位置
+			FVector TopViewPosition(
+				InterestPoint.Center.X + TopViewRadius * FMath::Cos(FMath::DegreesToRadians(FinalAngle)),
+				InterestPoint.Center.Y + TopViewRadius * FMath::Sin(FMath::DegreesToRadians(FinalAngle)),
+				TopViewHeight
+			);
+
+			// 创建俯视点
+			OverviewPoint.Point = TopViewPosition;
+			OverviewPoint.Orientation = (InterestPoint.Center - TopViewPosition).Rotation();
+			OverviewPoint.FOV = FMath::Clamp(CameraComponent->FieldOfView * 0.9f, 60.0f, 110.0f);
+			OverviewPoint.AOIIndex = AOIIndex;
+
+			// 调整避开障碍物
+			AdjustPathPointForObstacles(OverviewPoint, InterestPoint);
+
+			// 平滑过渡
+			FPathPointWithOrientation TransitionPoint;
+			TransitionPoint.Point = FMath::Lerp(OrbitPoints.Last().Point, OverviewPoint.Point, 0.5f);
+			TransitionPoint.Orientation = FMath::Lerp(OrbitPoints.Last().Orientation, OverviewPoint.Orientation, 0.5f);
+			TransitionPoint.FOV = FMath::Lerp(OrbitPoints.Last().FOV, OverviewPoint.FOV, 0.5f);
+			TransitionPoint.AOIIndex = AOIIndex;
+			AdjustPathPointForObstacles(TransitionPoint, InterestPoint);
+
+			// 添加过渡点和俯视点
+			OrbitPoints.Add(TransitionPoint);
+			OrbitPoints.Add(OverviewPoint);
+		}
+
+		// 将路径点添加到当前兴趣区域
+		CurrentInterestArea.PathPoints = OrbitPoints;
+
+		// 添加到兴趣区域数组
+		InterestAreas.Add(CurrentInterestArea);
+	}
+
+	// 计算美学评分
+	AsyncTask(ENamedThreads::GameThread, [this]() {
+		OnPathGenerationProgress.Broadcast(60.0f, TEXT("路径点生成完成，开始计算美学评分..."));
+		});
+
+	// 异步计算美学评分和覆盖度
+	if (NimaTracker)
+	{
+		Force3DTilesLoad(); // 强制加载3D Tiles以获得更准确的渲染
+
+		NimaTracker->IfSaveImage = bIsSaveImageForPrediction; // 决定是否保存美学评分的图像
+
+		// 为每个兴趣区域计算美学评分
+		for (FInterestArea& Area : InterestAreas)
+		{
+			int32 TotalPoints = Area.PathPoints.Num();
 			FThreadSafeCounter TaskCounter(TotalPoints);
 
-			for (int32 i = 0; i < CandidatePoints.Num(); ++i)
+			for (int32 i = 0; i < Area.PathPoints.Num(); ++i)
 			{
-				FPathPointWithOrientation& Viewpoint = CandidatePoints[i];
+				FPathPointWithOrientation& Viewpoint = Area.PathPoints[i];
 
 				AsyncTask(ENamedThreads::GameThread, [this, &Viewpoint, &TaskCounter, i, TotalPoints]()
 					{
-						// 更新进度
-						float ProgressPercent = 60.0f + 30.0f * ((float)i / TotalPoints);
-						OnPathGenerationProgress.Broadcast(
-							ProgressPercent,
-							FString::Printf(TEXT("计算美学评分 (%d/%d)..."), i + 1, TotalPoints)
-						);
-
 						// 渲染并获取美学评分
 						RenderViewpointToRenderTarget(Viewpoint);
 						if (NimaTracker)
 						{
 							NimaTracker->RunInference(RenderTarget);
+							while (NimaTracker->GetNimaScore() <= 0)
+							{
+								FPlatformProcess::Sleep(0.001f);
+							}
+							Viewpoint.AestheticScore = NimaTracker->GetNimaScore();
+							NimaTracker->ResetNimaScore();
 						}
 
-						while (NimaTracker->GetNimaScore() <= 0)
-						{
-							FPlatformProcess::Sleep(0.001f);
-						}
-
-						Viewpoint.AestheticScore = NimaTracker->GetNimaScore();
-						NimaTracker->ResetNimaScore();
-
-						// 计算覆盖角度
+						// 计算视角覆盖度
 						Viewpoint.CoverageAngle = CalculateViewpointCoverage(Viewpoint, InterestPoints[Viewpoint.AOIIndex]);
 
 						TaskCounter.Decrement();
@@ -1365,38 +1530,40 @@ void ADroneActor1::GenerateTraditionalOrbitPath_Internal()
 			{
 				FPlatformProcess::Sleep(0.001f);
 			}
-
-			DisableForce3DTilesLoad();
-
-			// 计算美学评分统计数据
-			float TotalScore = 0.0f;
-			float MinScore = FLT_MAX;
-			float MaxScore = -FLT_MAX;
-
-			for (const FPathPointWithOrientation& Point : CandidatePoints)
-			{
-				TotalScore += Point.AestheticScore;
-				MinScore = FMath::Min(MinScore, Point.AestheticScore);
-				MaxScore = FMath::Max(MaxScore, Point.AestheticScore);
-			}
-
-			float AvgScore = CandidatePoints.Num() > 0 ? TotalScore / CandidatePoints.Num() : 0.0f;
-
-			// 更新进度
-			AsyncTask(ENamedThreads::GameThread, [this, AvgScore, MinScore, MaxScore]() {
-				OnPathGenerationProgress.Broadcast(90.0f,
-					FString::Printf(TEXT("美学评分完成: 平均=%.2f, 最低=%.2f, 最高=%.2f"),
-						AvgScore, MinScore, MaxScore));
-
-				// 输出美学评分统计
-				UE_LOG(LogTemp, Warning, TEXT("Orbit path aesthetic statistics: Avg=%.2f, Min=%.2f, Max=%.2f"),
-					AvgScore, MinScore, MaxScore);
-				});
 		}
 
-		// 添加当前兴趣区域的路径点到全局路径点
-		GlobalPathPoints.Append(CandidatePoints);
+		DisableForce3DTilesLoad();
+		NimaTracker->IfSaveImage = false;
 	}
+
+	// --- 新增：使用STSP规划多区域连接路径 ---
+	AsyncTask(ENamedThreads::GameThread, [this]() {
+		OnPathGenerationProgress.Broadcast(80.0f, TEXT("开始规划最优连接路径..."));
+		});
+
+	// 设置起点和终点
+	StartLocation = GetActorLocation();
+	EndLocation = StartLocation; // 回到原点，也可以设置为其他位置
+
+	// 构建代价矩阵
+	TArray<FDoubleArray> CostMatrix;
+	bool bSuccess = BuildSTSPCostMatrix(CostMatrix);
+	if (!bSuccess)
+	{
+		UE_LOG(LogTemp, Error, TEXT("Failed to build cost matrix."));
+	}
+
+	// 使用TSP求解最优访问顺序
+	UMySTSPClass* STSPSolver = NewObject<UMySTSPClass>();
+	int NumRegions = InterestAreas.Num();
+	TArray<int32> BestOrder = STSPSolver->GeneticAlgorithm(CostMatrix, NumRegions);
+
+	// 根据最优顺序构建最终路径
+	TArray<FPathPointWithOrientation> FinalPath = BuildFinalPath(BestOrder);
+	GlobalPathPoints = FinalPath;
+
+	// 路径平滑处理
+	SmoothGlobalPathPoints_PositionOrientation(2);
 
 	// 计算每个点的飞行速度
 	AsyncTask(ENamedThreads::GameThread, [this]() {
@@ -1410,8 +1577,65 @@ void ADroneActor1::GenerateTraditionalOrbitPath_Internal()
 		});
 	PrecomputeAllDuration();
 
-	// 完成所有处理
-	AsyncTask(ENamedThreads::GameThread, [this]() {
+	// 计算美学评分统计数据
+	float TotalScore = 0.0f;
+	float MinScore = FLT_MAX;
+	float MaxScore = -FLT_MAX;
+	float ScoreSquareSum = 0.0f;
+
+	// 收集所有美学评分
+	TArray<float> AllScores;
+	AllScores.Reserve(GlobalPathPoints.Num());
+
+	for (const FPathPointWithOrientation& Point : GlobalPathPoints)
+	{
+		float Score = Point.AestheticScore;
+		TotalScore += Score;
+		MinScore = FMath::Min(MinScore, Score);
+		MaxScore = FMath::Max(MaxScore, Score);
+		ScoreSquareSum += Score * Score;
+		AllScores.Add(Score);
+	}
+
+	// 计算平均值和标准差
+	float AvgScore = GlobalPathPoints.Num() > 0 ? TotalScore / GlobalPathPoints.Num() : 0.0f;
+	float Variance = 0.0f;
+
+	if (GlobalPathPoints.Num() > 1)
+	{
+		Variance = (ScoreSquareSum - TotalScore * AvgScore) / GlobalPathPoints.Num();
+		// 防止由于浮点精度产生负方差
+		Variance = FMath::Max(0.0f, Variance);
+	}
+
+	float StdDev = FMath::Sqrt(Variance);
+
+	// 计算中位数
+	if (AllScores.Num() > 0)
+	{
+		AllScores.Sort();
+		float MedianScore = 0.0f;
+		if (AllScores.Num() % 2 == 0)
+		{
+			// 偶数个元素，取中间两个的平均
+			int32 MidIdx = AllScores.Num() / 2;
+			MedianScore = (AllScores[MidIdx - 1] + AllScores[MidIdx]) / 2.0f;
+		}
+		else
+		{
+			// 奇数个元素，直接取中间值
+			MedianScore = AllScores[AllScores.Num() / 2];
+		}
+
+		UE_LOG(LogTemp, Warning, TEXT("路径美学评分中位数: %.3f"), MedianScore);
+	}
+
+	// 打印美学评分统计
+	UE_LOG(LogTemp, Warning, TEXT("路径美学评分统计：总点数=%d, 平均分=%.3f, 最低分=%.3f, 最高分=%.3f, 标准差=%.3f"),
+		GlobalPathPoints.Num(), AvgScore, MinScore, MaxScore, StdDev);
+
+	// 在游戏线程中更新完成信息和美学评分统计
+	AsyncTask(ENamedThreads::GameThread, [this, AvgScore, MinScore, MaxScore, StdDev]() {
 		// 设置当前索引
 		currentIndex = 0;
 
@@ -1419,11 +1643,13 @@ void ADroneActor1::GenerateTraditionalOrbitPath_Internal()
 		bShouldDrawPathPoints = true;
 		fGenerationFinished = true;
 
-		OnPathGenerationProgress.Broadcast(100.0f, TEXT("智能环绕航线生成完成"));
-		OnPathGenerationComplete.Broadcast(true);
+		// 显示美学评分统计
+		FString StatisticsMessage = FString::Printf(
+			TEXT("智能环绕航线生成完成\n美学评分: 平均=%.2f, 最低=%.2f, 最高=%.2f, 标准差=%.2f"),
+			AvgScore, MinScore, MaxScore, StdDev);
 
-		GEngine->AddOnScreenDebugMessage(-1, 5.f, FColor::Green,
-			FString::Printf(TEXT("已生成智能环绕航线，共%d个点"), GlobalPathPoints.Num()));
+		OnPathGenerationProgress.Broadcast(100.0f, StatisticsMessage);
+		OnPathGenerationComplete.Broadcast(true);
 
 		UE_LOG(LogTemp, Warning, TEXT("已生成智能环绕航线，共%d个点"), GlobalPathPoints.Num());
 		});
@@ -2318,6 +2544,8 @@ void ADroneActor1::SmoothSegmentSpeed(int32 Iterations)
 	}
 }
 
+
+// 忘记写输出FOV了！
 void ADroneActor1::ExportPathPointsToWGS84Txt()
 {
 	// 使用时间命名文件
@@ -2633,6 +2861,61 @@ bool ADroneActor1::ImportPathPointsFromTxt(const FString& LoadFilePath)
 void ADroneActor1::SmoothGlobalPathPoints_PositionOrientation(int32 Iterations /*=1*/)
 {
     if (GlobalPathPoints.Num() < 3) return;
+
+	// 首先处理重复或极近的点
+	TArray<FPathPointWithOrientation> DedupedPoints;
+	const float MinDistanceThreshold = 50.0f; // 设置认为"几乎相同"的距离阈值
+
+	// 添加第一个点
+	DedupedPoints.Add(GlobalPathPoints[0]);
+
+	// 检查并移除几乎相同位置的点
+	for (int32 i = 1; i < GlobalPathPoints.Num(); ++i)
+	{
+		const FVector& PrevPos = DedupedPoints.Last().Point;
+		const FVector& CurrPos = GlobalPathPoints[i].Point;
+		float Distance = FVector::Dist(PrevPos, CurrPos);
+
+		// 如果点距离太近，我们合并它们
+		if (Distance < MinDistanceThreshold)
+		{
+			// 如果角度差异很大(>30度)，则保留两个点，否则用新点替换旧点
+			const FRotator& PrevRot = DedupedPoints.Last().Orientation;
+			const FRotator& CurrRot = GlobalPathPoints[i].Orientation;
+
+			float YawDiff = FMath::Abs(FMath::FindDeltaAngleDegrees(PrevRot.Yaw, CurrRot.Yaw));
+			float PitchDiff = FMath::Abs(FMath::FindDeltaAngleDegrees(PrevRot.Pitch, CurrRot.Pitch));
+
+			const float MaxAngleDiff = 30.0f;
+
+			if (YawDiff > MaxAngleDiff || PitchDiff > MaxAngleDiff)
+			{
+				// 角度差异大，保留新的观察点
+				GlobalPathPoints[i].Point = PrevPos + (CurrPos - PrevPos).GetSafeNormal() * MinDistanceThreshold;
+				DedupedPoints.Add(GlobalPathPoints[i]);
+			}
+			else
+			{
+				// 合并点，使用更好的美学分数
+				if (GlobalPathPoints[i].AestheticScore > DedupedPoints.Last().AestheticScore)
+				{
+					// 如果新点美学评分更高，替换旧点但保持位置
+					DedupedPoints.Last().Orientation = GlobalPathPoints[i].Orientation;
+					DedupedPoints.Last().FOV = GlobalPathPoints[i].FOV;
+					DedupedPoints.Last().AestheticScore = GlobalPathPoints[i].AestheticScore;
+				}
+				// 否则保留原有点，什么都不做
+			}
+		}
+		else
+		{
+			// 位置差异足够大，正常添加点
+			DedupedPoints.Add(GlobalPathPoints[i]);
+		}
+	}
+
+	// 用去重后的点更新GlobalPathPoints
+	GlobalPathPoints = DedupedPoints;
 
     for (int32 iter = 0; iter < Iterations; ++iter)
     {
@@ -3233,16 +3516,84 @@ void ADroneActor1::GenerateOrbitFlightPath_Internal()
 	ExportPathPointsToWGS84Txt();
 
 	DisableForce3DTilesLoad();
-	// 完成处理
-	// 尝试全部交给广播事件处理
-	AsyncTask(ENamedThreads::GameThread, [this, numInterestPoints, numOptimizedPathPoints]()
+
+	// --- 新增：计算美学评分统计数据 ---
+	float TotalScore = 0.0f;
+	float MinScore = FLT_MAX;
+	float MaxScore = -FLT_MAX;
+	float ScoreSquareSum = 0.0f;
+
+	// 收集所有美学评分
+	TArray<float> AllScores;
+	AllScores.Reserve(GlobalPathPoints.Num());
+
+	for (const FPathPointWithOrientation& Point : GlobalPathPoints)
+	{
+		float Score = Point.AestheticScore;
+		TotalScore += Score;
+		MinScore = FMath::Min(MinScore, Score);
+		MaxScore = FMath::Max(MaxScore, Score);
+		ScoreSquareSum += Score * Score;
+		AllScores.Add(Score);
+	}
+
+	// 计算平均值和标准差
+	float AvgScore = GlobalPathPoints.Num() > 0 ? TotalScore / GlobalPathPoints.Num() : 0.0f;
+	float Variance = 0.0f;
+
+	if (GlobalPathPoints.Num() > 1)
+	{
+		Variance = (ScoreSquareSum - TotalScore * AvgScore) / GlobalPathPoints.Num();
+		// 防止由于浮点精度产生负方差
+		Variance = FMath::Max(0.0f, Variance);
+	}
+
+	float StdDev = FMath::Sqrt(Variance);
+
+	// 计算中位数
+	if (AllScores.Num() > 0)
+	{
+		AllScores.Sort();
+		float MedianScore = 0.0f;
+		if (AllScores.Num() % 2 == 0)
 		{
-			OnPathGenerationProgress.Broadcast(100.0f, TEXT("Generation complete"));
+			// 偶数个元素，取中间两个的平均
+			int32 MidIdx = AllScores.Num() / 2;
+			MedianScore = (AllScores[MidIdx - 1] + AllScores[MidIdx]) / 2.0f;
+		}
+		else
+		{
+			// 奇数个元素，直接取中间值
+			MedianScore = AllScores[AllScores.Num() / 2];
+		}
+
+		// 打印中位数
+		UE_LOG(LogTemp, Warning, TEXT("路径美学评分中位数: %.3f"), MedianScore);
+	}
+
+	// 打印美学评分统计
+	UE_LOG(LogTemp, Warning, TEXT("路径美学评分统计：总点数=%d, 平均分=%.3f, 最低分=%.3f, 最高分=%.3f, 标准差=%.3f"),
+		GlobalPathPoints.Num(), AvgScore, MinScore, MaxScore, StdDev);
+
+	// 在游戏线程中更新完成信息和美学评分统计
+	AsyncTask(ENamedThreads::GameThread, [this, AvgScore, MinScore, MaxScore, StdDev]()
+		{
+			// 设置当前索引
+			currentIndex = 0;
+
+			// 启用路径点绘制
+			bShouldDrawPathPoints = true;
+			fGenerationFinished = true;
+
+			// 显示美学评分统计
+			FString StatisticsMessage = FString::Printf(
+				TEXT("智能轨道航线生成完成\n美学评分: 平均=%.2f, 最低=%.2f, 最高=%.2f, 标准差=%.2f"),
+				AvgScore, MinScore, MaxScore, StdDev);
+
+			OnPathGenerationProgress.Broadcast(100.0f, StatisticsMessage);
 			OnPathGenerationComplete.Broadcast(true);
 
-			GEngine->AddOnScreenDebugMessage(-1, 5.f, FColor::Yellow,
-				FString::Printf(TEXT("Generated paths: %d initial, %d optimized"),
-					numInterestPoints, numOptimizedPathPoints));
+			UE_LOG(LogTemp, Warning, TEXT("已生成智能轨道航线，共%d个点"), GlobalPathPoints.Num());
 		});
 
 	// GEngine->AddOnScreenDebugMessage(-1, 5.f, FColor::Yellow, FString::Printf(TEXT("Generated initial orbit paths with %d points"), numInterestPoints));
@@ -3550,7 +3901,7 @@ void ADroneActor1::Force3DTilesLoad() {
 					if (ACesium3DTileset* Tileset = Cast<ACesium3DTileset>(Actor))
 					{
 						Tileset->EnableFrustumCulling = false;  // 禁用视锥体剔除，强制加载所有相关瓦片
-						Tileset->EnableFogCulling = false;      // 禁用雾剔除
+						//Tileset->EnableFogCulling = false;      // 禁用雾剔除
 						//Tileset->SetCreatePhysicsMeshes(true);  // 确保物理碰撞体生成
 
 						UE_LOG(LogTemp, Log, TEXT("Tileset updated: %s"), *Tileset->GetName());
@@ -3590,8 +3941,8 @@ void ADroneActor1::DisableForce3DTilesLoad() {
 					if (Tileset)
 					{
 						Tileset->EnableFrustumCulling = true; // 重新启用视锥体剔除
-						Tileset->EnableFogCulling = true;
-						Tileset->RefreshTileset(); // 刷新瓦片加载
+						//Tileset->EnableFogCulling = true;
+						//Tileset->RefreshTileset(); // 刷新瓦片加载
 						UE_LOG(LogTemp, Log, TEXT("Tileset updated: %s"), *Tileset->GetName());
 					}
 				}
@@ -4112,11 +4463,23 @@ void ADroneActor1::SelectBestViewpoints(
 		}
 	}
 
-	// 如果没有满足约束条件的视点组合,返回空数组
+	// 如果没有满足约束条件的视点组合,先尝试增大组合数量
 	if (ValidViewpointCombinations.Num() == 0)
 	{
-		OutBestViewpoints.Empty();
-		return;
+		UE_LOG(LogTemp, Warning, TEXT("No valid viewpoint combinations found. Trying to increase the number of required viewpoints."));
+		GenerateViewpointGroups(FilteredViewpoints, NumRequired, ViewpointCombinations, 2000);
+		for (const auto& Combination : ViewpointCombinations)
+		{
+			if (IsCoverageSatisfied(Combination) && IsDistanceSatisfied(Combination))
+			{
+				ValidViewpointCombinations.Add(Combination);
+			}
+		}
+		if (ValidViewpointCombinations.Num() == 0) {
+			UE_LOG(LogTemp, Warning, TEXT("No valid viewpoint combinations found after increasing the number of required viewpoints."));
+			OutBestViewpoints.Empty();
+			return;
+		}
 	}
 
 	// 在满足约束条件的视点组合中选择美学评分最高的组合
@@ -4221,7 +4584,9 @@ void ADroneActor1::SelectBestViewpointGroups(
 
 	// 创建一个异步任务计数器
 	FThreadSafeCounter TaskCounter(ScoredViewpoints.Num());
-	NimaTracker->IfSaveImage = true; // 决定是否保存美学评分的图像
+	NimaTracker->IfSaveImage = bIsSaveImageForPrediction; // 决定是否保存美学评分的图像
+
+	Force3DTilesLoad(); // 强制加载3D瓦片
 	// 为每个视点创建异步推理任务
 	for (FPathPointWithOrientation& Viewpoint : ScoredViewpoints)
 	{
@@ -4262,9 +4627,6 @@ void ADroneActor1::SelectBestViewpointGroups(
 	{
 		FPlatformProcess::Sleep(0.001f);
 	}
-
-	NimaTracker->IfSaveImage = false;
-	UE_LOG(LogTemp, Warning, TEXT("Aesthetic Computation Completed"));
 
 	// ... (其余代码保持不变)
 
@@ -4310,6 +4672,11 @@ void ADroneActor1::SelectBestViewpointGroups(
 			FilteredViewpoints.Add(Viewpoint);
 		}
 	}
+
+	DisableForce3DTilesLoad(); // 恢复3D瓦片加载
+
+	NimaTracker->IfSaveImage = false;
+	UE_LOG(LogTemp, Warning, TEXT("Aesthetic Computation Completed"));
 
 	// 生成视点组合
 	TArray<TArray<FPathPointWithOrientation>> ViewpointGroups;
@@ -4359,26 +4726,114 @@ void ADroneActor1::SelectBestViewpointGroups(
 void ADroneActor1::GenerateViewpointGroups(
 	const TArray<FPathPointWithOrientation>& Viewpoints,
 	int32 GroupSize,
-	TArray<TArray<FPathPointWithOrientation>>& OutViewpointGroups)
+	TArray<TArray<FPathPointWithOrientation>>& OutViewpointGroups,
+	int32 MaxCombinations)
 {
 	const int32 NumViewpoints = Viewpoints.Num();
 
 	// 生成所有可能的视点组合
 	UE_LOG(LogTemp, Warning, TEXT("Number of viewpoints: %d"), NumViewpoints);
-	TArray<TArray<int32>> IndexCombinations;
-	GenerateCombinationsHelper(NumViewpoints, GroupSize, TArray<int32>(), IndexCombinations);
 
-	// 将索引组合转换为视点组合
-	OutViewpointGroups.Reset();
-	for (const auto& IndexCombination : IndexCombinations)
+	// 计算可能的总组合数
+	int64 TotalPossibleCombinations = 1;
+	for (int32 i = 0; i < GroupSize; i++)
 	{
-		TArray<FPathPointWithOrientation> ViewpointGroup;
-		for (int32 Index : IndexCombination)
-		{
-			ViewpointGroup.Add(Viewpoints[Index]);
-		}
-		OutViewpointGroups.Add(ViewpointGroup);
+		TotalPossibleCombinations *= (NumViewpoints - i);
+		TotalPossibleCombinations /= (i + 1);
 	}
+
+	// 如果组合数量太大，提前打印警告
+	if (TotalPossibleCombinations > 10000)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("Potential combination explosion! Total possible combinations: %lld, limiting to %d best ones"),
+			TotalPossibleCombinations, MaxCombinations);
+	}
+
+	// 使用评分排序的组合集合
+	TArray<TPair<float, TArray<FPathPointWithOrientation>>> ScoredViewpointGroups;
+
+	// 生成组合并同时计算评分
+	// 对于极大规模的输入，我们可以使用随机采样而非穷举
+	if (TotalPossibleCombinations > 50000) // 如果可能的组合实在太多
+	{
+		const int32 SampleCount = MaxCombinations * 10; // 采样数量 = 最终需要的10倍
+
+		// 随机采样生成组合
+		for (int32 i = 0; i < SampleCount; i++)
+		{
+			TArray<int32> RandomCombination;
+			RandomCombination.Reserve(GroupSize);
+
+			// 随机选择不重复的索引
+			TArray<int32> AvailableIndices;
+			for (int32 j = 0; j < NumViewpoints; j++)
+			{
+				AvailableIndices.Add(j);
+			}
+
+			for (int32 j = 0; j < GroupSize && AvailableIndices.Num() > 0; j++)
+			{
+				// 随机选择一个可用索引
+				int32 RandomIndex = FMath::RandRange(0, AvailableIndices.Num() - 1);
+				RandomCombination.Add(AvailableIndices[RandomIndex]);
+				AvailableIndices.RemoveAt(RandomIndex);
+			}
+
+			// 构建视点组
+			TArray<FPathPointWithOrientation> ViewpointGroup;
+			float GroupScore = 0.0f;
+			for (int32 Index : RandomCombination)
+			{
+				ViewpointGroup.Add(Viewpoints[Index]);
+				GroupScore += Viewpoints[Index].AestheticScore;
+			}
+
+			// 计算平均美学评分
+			GroupScore /= ViewpointGroup.Num();
+
+			// 添加到评分组合列表
+			ScoredViewpointGroups.Add(TPair<float, TArray<FPathPointWithOrientation>>(GroupScore, ViewpointGroup));
+		}
+	}
+	else // 对于适中规模的输入，使用传统方法生成所有组合
+	{
+		TArray<TArray<int32>> IndexCombinations;
+		GenerateCombinationsHelper(NumViewpoints, GroupSize, TArray<int32>(), IndexCombinations);
+
+		for (const auto& IndexCombination : IndexCombinations)
+		{
+			TArray<FPathPointWithOrientation> ViewpointGroup;
+			float GroupScore = 0.0f;
+			for (int32 Index : IndexCombination)
+			{
+				ViewpointGroup.Add(Viewpoints[Index]);
+				GroupScore += Viewpoints[Index].AestheticScore;
+			}
+
+			// 计算平均美学评分
+			GroupScore /= ViewpointGroup.Num();
+
+			// 添加到评分组合列表
+			ScoredViewpointGroups.Add(TPair<float, TArray<FPathPointWithOrientation>>(GroupScore, ViewpointGroup));
+		}
+	}
+
+	// 按美学评分降序排序
+	ScoredViewpointGroups.Sort([](const TPair<float, TArray<FPathPointWithOrientation>>& A,
+		const TPair<float, TArray<FPathPointWithOrientation>>& B) {
+			return A.Key > B.Key; // 降序排列，最高分在前
+		});
+
+	// 只保留最佳的N个组合
+	OutViewpointGroups.Reset();
+	const int32 NumToKeep = FMath::Min(MaxCombinations, ScoredViewpointGroups.Num());
+	for (int32 i = 0; i < NumToKeep; i++)
+	{
+		OutViewpointGroups.Add(ScoredViewpointGroups[i].Value);
+	}
+
+	UE_LOG(LogTemp, Warning, TEXT("Generated %d viewpoint groups out of %lld possible combinations"),
+		OutViewpointGroups.Num(), TotalPossibleCombinations);
 }
 
 void ADroneActor1::GenerateCombinationsHelper(
@@ -5078,6 +5533,7 @@ TArray<FPathPointWithOrientation> ADroneActor1::GenerateSplinePath(
 
 	// 异步计算美学评分
 	FThreadSafeCounter TaskCounter(OutSplinePoints.Num());
+	Force3DTilesLoad();
 	for (FPathPointWithOrientation& Viewpoint : OutSplinePoints)
 	{
 		AsyncTask(ENamedThreads::GameThread, [this, &Viewpoint, &TaskCounter]()
@@ -5118,6 +5574,7 @@ TArray<FPathPointWithOrientation> ADroneActor1::GenerateSplinePath(
 	{
 		FPlatformProcess::Sleep(0.001f);
 	}
+	DisableForce3DTilesLoad();
 
 	return ControlPoints;
 }
@@ -5589,6 +6046,10 @@ bool ADroneActor1::BuildAndProcessPathSegment(
 	//RRTClass->SetWorld(GetWorld()); // 设置世界 必须！
 
 	TArray<FVector> LocalOptimizedPath;
+	// 建议修改为
+	float _StepSize = FMath::Min(FVector::Distance(StartPos, EndPos) * 0.1f, 1000.0f);
+	_StepSize = FMath::Max(_StepSize, 200.0f); // 增大最小步长
+	double _NeighborRadius = FMath::Max(_StepSize * 3.0, 20000.0f); // 更大的邻居搜索半径可以提高路径质量
 	TArray<FPathPointWithOrientation> RRTPath = LocalRRTClass->GenerateAndSmoothRRTPath(
 		StartPos,
 		EndPos,
@@ -5596,7 +6057,13 @@ bool ADroneActor1::BuildAndProcessPathSegment(
 		LocalOptimizedPath,
 		PrevExtraPoint,
 		NextExtraPoint,
-		fMinDisBetwenPoints
+		fMinDisBetwenPoints,
+		10,
+		3.0f,
+		200.0f,
+		10,
+		_StepSize,
+		_NeighborRadius
 	);
 	// 添加到测试路径点集
 	/*if (!LocalOptimizedPath.IsEmpty()) {
@@ -5730,6 +6197,7 @@ bool ADroneActor1::BuildAndProcessPathSegment(
 
 	// 异步计算美学评分
 	FThreadSafeCounter TaskCounter(RRTPath.Num());
+	Force3DTilesLoad(); // 确保3DTiles加载完成
 	for (FPathPointWithOrientation& Viewpoint : RRTPath)
 	{
 		AsyncTask(ENamedThreads::GameThread, [this, &Viewpoint, &TaskCounter]()
@@ -5770,6 +6238,8 @@ bool ADroneActor1::BuildAndProcessPathSegment(
 	{
 		FPlatformProcess::Sleep(0.001f);
 	}
+
+	DisableForce3DTilesLoad(); // 恢复3DTiles加载
 
 	OutCost = ComputeTransiPathCost(RRTPath, StartRegionIndex, TargetRegionIndex, PrevMidPoint, NextMidPoint);
 	// 去除RRTPath中的第一个点，因为它是StartPos
@@ -6247,11 +6717,126 @@ void ADroneActor1::CheckGenerationProgress()
 }
 
 
+// 实现手动路径点记录相关函数
+void ADroneActor1::ToggleManualPathRecording()
+{
+	bIsManualRecordingPath = !bIsManualRecordingPath;
+
+	if (bIsManualRecordingPath)
+	{
+		// 清空之前的手动路径点
+		ManualPathPoints.Empty();
+		LastRecordTime = GetWorld()->GetTimeSeconds();
+		GEngine->AddOnScreenDebugMessage(-1, 5.f, FColor::Yellow, TEXT("手动路径点记录已开始 - 按 F 记录点, C 结束"));
+
+		// 记录起始点
+		RecordCurrentPositionAsPathPoint();
+	}
+	else
+	{
+		FinishManualPathRecording();
+	}
+}
+
+void ADroneActor1::RecordCurrentPositionAsPathPoint()
+{
+	if (!bIsManualRecordingPath)
+		return;
+
+	// 检查冷却时间以避免频繁记录
+	float CurrentTime = GetWorld()->GetTimeSeconds();
+	if (CurrentTime - LastRecordTime < ManualRecordCooldown)
+		return;
+
+	LastRecordTime = CurrentTime;
+
+	// 创建路径点并记录当前位置、方向和FOV
+	FPathPointWithOrientation PathPoint;
+	PathPoint.Point = GetActorLocation();
+	PathPoint.Orientation = GetActorRotation();
+	PathPoint.FOV = CameraComponent->FieldOfView;
+	PathPoint.AOIIndex = -1; // 手动模式下先不关联具体兴趣区域
+
+	// 查找最近的兴趣区域(如果存在)
+	float ClosestDistance = TNumericLimits<float>::Max();
+	int32 ClosestAOIIndex = -1;
+
+	for (int32 i = 0; i < InterestPoints.Num(); ++i)
+	{
+		const FCylindricalInterestPoint& AOI = InterestPoints[i];
+		float Distance = FVector::Dist(PathPoint.Point, AOI.Center);
+		if (Distance < ClosestDistance)
+		{
+			ClosestDistance = Distance;
+			ClosestAOIIndex = i;
+		}
+	}
+
+	// 如果有足够近的兴趣区域，关联起来
+	const float MaxAssociationDistance = 5000.0f; // 50米内的兴趣区域会被关联
+	if (ClosestAOIIndex != -1 && ClosestDistance < MaxAssociationDistance)
+	{
+		PathPoint.AOIIndex = ClosestAOIIndex;
+	}
+
+	// 添加到手动路径点数组
+	ManualPathPoints.Add(PathPoint);
+
+	// 显示调试信息
+	int32 PointCount = ManualPathPoints.Num();
+	GEngine->AddOnScreenDebugMessage(-1, 1.f, FColor::Green,
+		FString::Printf(TEXT("记录路径点 #%d: %s"), PointCount, *PathPoint.Point.ToString()));
+
+	// 在世界中标记该点
+	DrawDebugSphere(GetWorld(), PathPoint.Point, 50.0f, 8, FColor::Yellow, true, 10.0f, 0, 3.0f);
+	DrawDebugLine(GetWorld(), PathPoint.Point, PathPoint.Point + PathPoint.Orientation.Vector() * 200.0f,
+		FColor::Yellow, true, 10.0f, 0, 2.0f);
+}
+
+void ADroneActor1::FinishManualPathRecording()
+{
+	if (ManualPathPoints.Num() < 2)
+	{
+		GEngine->AddOnScreenDebugMessage(-1, 5.f, FColor::Red, TEXT("需要至少两个路径点才能生成路径"));
+		bIsManualRecordingPath = false;
+		return;
+	}
+
+	// 显示点数信息
+	GEngine->AddOnScreenDebugMessage(-1, 5.f, FColor::Green,
+		FString::Printf(TEXT("手动路径点记录完成，共 %d 个点"), ManualPathPoints.Num()));
+
+	// 将手动路径点直接赋值给全局路径点
+	GlobalPathPoints = ManualPathPoints;
+
+	// 对路径点进行平滑处理
+	SmoothGlobalPathPoints_PositionOrientation(2);
+
+	// 计算每个点的速度
+	ComputeSpeedByCurvatureAndViewChange(fMaxFlightSpeed, fMinFlightSpeed);
+
+	// 预计算飞行持续时间
+	PrecomputeAllDuration();
+
+	// 设置路径生成完成标志
+	bShouldDrawPathPoints = true;
+	fGenerationFinished = true;
+	currentIndex = 0;
+
+	// 显示生成的路径
+	ShowPathPoints();
+
+	bIsManualRecordingPath = false;
+}
+
+
 void ADroneActor1::OnGenerateTraditionalOrbit()
 {
 	// 如果已经有路径，先清除
 	if (fGenerationFinished)
 	{
+		// 清空路径点
+		InterestPoints.Empty();
 		GlobalPathPoints.Empty();
 		bShouldDrawPathPoints = false;
 		fGenerationFinished = false;
@@ -6404,6 +6989,8 @@ void ADroneActor1::OnStartFlightAlongPath()
 
 
 void ADroneActor1::OnReadPathFromFile() {
+
+	UE_LOG(LogTemp, Warning, TEXT("Reading path from file..."));
 	// 获取项目目录
 	FString ProjectDir = FPaths::ProjectDir();
 
@@ -6700,44 +7287,184 @@ void ADroneActor1::HandleScreenshotProcessed()
 	FScreenshotRequest::OnScreenshotRequestProcessed().RemoveAll(this);
 }
 
-// 在DroneActor1.cpp中实现
+
+void ADroneActor1::OnRecordVideo()
+{
+	UE_LOG(LogTemp, Warning, TEXT("Triggered Record"));
+	// 添加空指针检查
+	if (bIsRecording)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("Recording already in progress"));
+		// 添加额外的安全检查，确保MovieSceneCaptureInstance有效
+		if (MovieSceneCaptureInstance != nullptr)
+		{
+			StopRecording();
+		}
+		else
+		{
+			UE_LOG(LogTemp, Error, TEXT("Invalid MovieSceneCaptureInstance but bIsRecording is true. Resetting state."));
+			bIsRecording = false;
+		}
+		return;
+	}
+	StartRecording();
+}
+
 void ADroneActor1::StartRecording()
 {
+	// 检查是否已经在录制
 	if (bIsRecording)
-		return;
-
-	// 生成唯一会话ID
-	RecordingSessionID = FGuid::NewGuid().ToString();
-
-	APlayerController* PC = GetWorld()->GetFirstPlayerController();
-	if (PC)
 	{
-		// 设置录制参数
-		FString CaptureCommand = FString::Printf(
-			TEXT("StartMovieCapture highres=true width=%d height=%d fps=60 warmup=0 seq=DroneFlightCapture_%s"),
-			ViewportWidth, ViewportHeight, *RecordingSessionID
-		);
-
-		PC->ConsoleCommand(*CaptureCommand);
-		bIsRecording = true;
-
-		GEngine->AddOnScreenDebugMessage(-1, 5.0f, FColor::Green, TEXT("Recording started"));
+		UE_LOG(LogTemp, Warning, TEXT("Recording already in progress"));
+		return;
 	}
+
+	// 创建 MovieSceneCapture 对象
+	MovieSceneCaptureInstance = NewObject<UMovieSceneCapture>();
+	if (!MovieSceneCaptureInstance)
+	{
+		UE_LOG(LogTemp, Error, TEXT("Failed to create MovieSceneCapture object"));
+		return;
+	}
+
+	// 配置捕获设置
+	FMovieSceneCaptureSettings& CaptureSettings = MovieSceneCaptureInstance->Settings;
+
+	// 设置输出目录
+	CaptureSettings.OutputDirectory.Path = FPaths::ProjectSavedDir() / TEXT("VideoCaptures");
+
+	// 设置更高的帧率 (30fps)
+	CaptureSettings.bUseCustomFrameRate = true;
+	CaptureSettings.CustomFrameRate = FFrameRate(30, 1);
+
+	// 设置更高的分辨率
+	CaptureSettings.Resolution.ResX = 2560;
+	CaptureSettings.Resolution.ResY = 1440;
+
+	// 其他设置
+	CaptureSettings.bOverwriteExisting = true;
+	CaptureSettings.bEnableTextureStreaming = true;
+	CaptureSettings.bCinematicMode = true;
+	CaptureSettings.bCinematicEngineScalability = true;
+
+	// 设置文件名格式 - 这里可能是崩溃的原因
+	// 使用安全的方式生成日期时间字符串
+	FString DateTimeStr = FDateTime::Now().ToString(TEXT("%Y%m%d_%H%M%S"));
+	if (DateTimeStr.IsEmpty()) {
+		DateTimeStr = TEXT("UnknownTime"); // 提供后备值
+	}
+
+	// 使用安全的字符串连接方式而不是Printf
+	CaptureSettings.OutputFormat = FString(TEXT("DroneCapture_")) + DateTimeStr;
+
+	// 调整后处理设置
+	if (GetWorld() && GetWorld()->GetGameViewport())
+	{
+		GetWorld()->GetGameViewport()->EngineShowFlags.SetPostProcessing(true);
+		GetWorld()->GetGameViewport()->EngineShowFlags.SetMotionBlur(false);
+	}
+
+	// 获取当前 Viewport
+	if (GEngine && GEngine->GameViewport)
+	{
+		FViewport* Viewport = GEngine->GameViewport->Viewport;
+		if (Viewport)
+		{
+			// 创建一个共享的 FSceneViewport 指针
+			TSharedPtr<FSceneViewport> SharedSceneViewport;
+			if (FSceneViewport* SceneViewport = static_cast<FSceneViewport*>(Viewport))
+			{
+				SharedSceneViewport = TSharedPtr<FSceneViewport>(SceneViewport, [](FSceneViewport*) {});
+
+				// 初始化捕获
+				MovieSceneCaptureInstance->Initialize(SharedSceneViewport);
+
+				// 启动捕获
+				MovieSceneCaptureInstance->StartCapture();
+				bIsRecording = true;
+
+				UE_LOG(LogTemp, Log, TEXT("Started recording: %s"), *CaptureSettings.OutputFormat);
+
+				// 这里也可能有格式化问题，更安全的方式是:
+				GEngine->AddOnScreenDebugMessage(-1, 5.f, FColor::Green,
+					FString::Printf(TEXT("Recording started: %s"), *CaptureSettings.OutputFormat));
+
+				// 绑定捕获结束事件
+				MovieSceneCaptureInstance->OnCaptureFinished().AddUObject(this, &ADroneActor1::OnRecordingFinished);
+
+				return;
+			}
+		}
+		UE_LOG(LogTemp, Error, TEXT("Failed to get valid Viewport"));
+	}
+	else
+	{
+		UE_LOG(LogTemp, Error, TEXT("Cannot access GameViewport"));
+	}
+
+	// 清理失败的捕获实例
+	MovieSceneCaptureInstance = nullptr;
 }
+
 
 void ADroneActor1::StopRecording()
 {
+	// 添加强健的空指针检查
 	if (!bIsRecording)
-		return;
-
-	APlayerController* PC = GetWorld()->GetFirstPlayerController();
-	if (PC)
 	{
-		PC->ConsoleCommand(TEXT("StopMovieCapture"));
-		bIsRecording = false;
+		UE_LOG(LogTemp, Warning, TEXT("No active recording to stop"));
+		return;
+	}
 
-		FString OutputMessage = FString::Printf(TEXT("Recording saved with ID: %s"), *RecordingSessionID);
-		GEngine->AddOnScreenDebugMessage(-1, 5.0f, FColor::Green, *OutputMessage);
+	if (MovieSceneCaptureInstance == nullptr)
+	{
+		UE_LOG(LogTemp, Error, TEXT("MovieSceneCaptureInstance is null but bIsRecording is true. Resetting state."));
+		bIsRecording = false;
+		return;
+	}
+
+	// 停止捕获 - 使用try-catch防止崩溃
+	try
+	{
+		MovieSceneCaptureInstance->Finalize();
+
+		// 恢复默认渲染设置
+		if (GetWorld())
+		{
+			GEngine->Exec(GetWorld(), TEXT("r.ScreenPercentage 100"));
+		}
+
+		UE_LOG(LogTemp, Log, TEXT("Recording stopped"));
+		if (GEngine)
+		{
+			GEngine->AddOnScreenDebugMessage(-1, 5.f, FColor::Green, TEXT("Recording stopped"));
+		}
+	}
+	catch (...)
+	{
+		UE_LOG(LogTemp, Error, TEXT("Exception occurred while stopping recording"));
+	}
+
+	// 重置状态
+	bIsRecording = false;
+	MovieSceneCaptureInstance = nullptr;
+}
+
+void ADroneActor1::OnRecordingFinished()
+{
+	// 添加安全检查
+	if (GetWorld())
+	{
+		GEngine->Exec(GetWorld(), TEXT("r.ScreenPercentage 100"));
+	}
+
+	bIsRecording = false;
+	MovieSceneCaptureInstance = nullptr;
+
+	UE_LOG(LogTemp, Log, TEXT("Recording completed"));
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(-1, 5.f, FColor::Green, TEXT("Recording completed"));
 	}
 }
 
