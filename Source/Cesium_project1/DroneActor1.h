@@ -395,6 +395,13 @@ public:
         const TArray<FCylindricalInterestPoint>& AllInterestPoints,
         int32 CurrentAOIIndex);
 
+	// 路径安全距离分析
+    void AnalyzePathSafetyDistances(const TArray<FPathPointWithOrientation>& Path);
+	// 保存安全距离到CSV
+    void SaveSafetyDistancesToCSV(const TArray<float>& Distances, int32 OutOfRangeCount, float MaxRange);
+
+
+
     //====================================================================================
     // 路径代价计算
     //====================================================================================

@@ -1634,6 +1634,8 @@ void ADroneActor1::GenerateTraditionalOrbitPath_Internal()
 	UE_LOG(LogTemp, Warning, TEXT("路径美学评分统计：总点数=%d, 平均分=%.3f, 最低分=%.3f, 最高分=%.3f, 标准差=%.3f"),
 		GlobalPathPoints.Num(), AvgScore, MinScore, MaxScore, StdDev);
 
+	AnalyzePathSafetyDistances(GlobalPathPoints);
+
 	// 在游戏线程中更新完成信息和美学评分统计
 	AsyncTask(ENamedThreads::GameThread, [this, AvgScore, MinScore, MaxScore, StdDev]() {
 		// 设置当前索引
@@ -2644,7 +2646,7 @@ void ADroneActor1::ExportPathPointsToWGS84Txt()
 		//  - Pitch/Yaw/Roll 可以输出更多小数位，如 "%.15f" 或 "%g"
 		//  - 若想完全匹配示例，就可统一 %.15f
 		FString Line = FString::Printf(
-			TEXT("id=%d X=%.12f Y=%.12f Z=%.12f Pitch=%.15f Yaw=%.15f Roll=%.15f Speed=%.2f"),
+			TEXT("id=%d X=%.12f Y=%.12f Z=%.12f Pitch=%.15f Yaw=%.15f Roll=%.15f FOV=%.2f Speed=%.2f"),
 			IndexNum,
 			Longitude,
 			Latitude,
@@ -2652,6 +2654,7 @@ void ADroneActor1::ExportPathPointsToWGS84Txt()
 			PitchNEU,
 			YawNEU,
 			RollNEU,
+			PathPt.FOV,
 			PathPt.SegmentSpeed / 100
 		);
 		IndexNum++;
@@ -2703,7 +2706,7 @@ bool ADroneActor1::ImportPathPointsFromTxt(const FString& LoadFilePath)
 		TArray<FString> Tokens;
 		Line.ParseIntoArray(Tokens, TEXT(" "), true);
 
-		if (Tokens.Num() < 8)
+		if (Tokens.Num() < 9)  // 需要至少9个参数 (包含id、xyz、pitch、yaw、roll、fov、speed)
 		{
 			UE_LOG(LogTemp, Warning, TEXT("Line format invalid: %s"), *Line);
 			continue;
@@ -2720,15 +2723,16 @@ bool ADroneActor1::ImportPathPointsFromTxt(const FString& LoadFilePath)
 				return 0.0;
 			};
 
-		// 3) 读出 (Longitude,Latitude,Altitude, PitchNEU,YawNEU,RollNEU, Speed)
-		int IndexNum = ParseKeyValue(Tokens[0]); // id=...
-		double LonVal = ParseKeyValue(Tokens[1]); // X=...
-		double LatVal = ParseKeyValue(Tokens[2]); // Y=...
-		double AltVal = ParseKeyValue(Tokens[3]); // Z=...
+		// 3) 读出 (Longitude,Latitude,Altitude, PitchNEU,YawNEU,RollNEU, FOV, Speed)
+		int IndexNum = ParseKeyValue(Tokens[0]);   // id=...
+		double LonVal = ParseKeyValue(Tokens[1]);  // X=...
+		double LatVal = ParseKeyValue(Tokens[2]);  // Y=...
+		double AltVal = ParseKeyValue(Tokens[3]);  // Z=...
 		double PitchNEU = ParseKeyValue(Tokens[4]); // Pitch=...
-		double YawNEU = ParseKeyValue(Tokens[5]); // Yaw=...
-		double RollNEU = ParseKeyValue(Tokens[6]); // Roll=...
-		double SpeedVal = ParseKeyValue(Tokens[7]); // Speed=...
+		double YawNEU = ParseKeyValue(Tokens[5]);   // Yaw=...
+		double RollNEU = ParseKeyValue(Tokens[6]);  // Roll=...
+		double FOVVal = ParseKeyValue(Tokens[7]);   // FOV=...
+		double SpeedVal = ParseKeyValue(Tokens[8]); // Speed=...
 
 		double RealSpeed = (double)(SpeedVal * 100.0); // 若导出时是 /100
 
@@ -2759,13 +2763,14 @@ bool ADroneActor1::ImportPathPointsFromTxt(const FString& LoadFilePath)
 		FPathPointWithOrientation NewPt;
 		NewPt.Point = UnrealPos;
 		NewPt.Orientation = FinalUnrealRot;
+		NewPt.FOV = FOVVal;  // 添加FOV参数
 		NewPt.SegmentSpeed = RealSpeed;
 
-		// 如果你还有 FOV/AngleRange 等字段，请在这里补全
+		// 如果你还有其他字段需要补全，请在这里添加
 		// ...
 
 		LoadedPoints.Add(NewPt);
-		UE_LOG(LogTemp, Log, TEXT("Loaded id %d"), IndexNum);
+		UE_LOG(LogTemp, Log, TEXT("Loaded id %d with FOV %.2f"), IndexNum, FOVVal);
 	}
 
 	// 7) 赋值到 GlobalPathPoints 或其它容器
@@ -3279,7 +3284,7 @@ void ADroneActor1::GenerateOrbitFlightPath_Internal()
 			OrbitRadius, OrbitRadius1, OrbitRadius2,
 			MinHeight, MaxHeight);
 		TArray<float> AllRadius = { OrbitRadius,OrbitRadius1 };
-
+		
 		TArray<float> Heights;
 		Heights.Add(MinHeight);
 		Heights.Add(MaxHeight);
@@ -3574,6 +3579,9 @@ void ADroneActor1::GenerateOrbitFlightPath_Internal()
 	// 打印美学评分统计
 	UE_LOG(LogTemp, Warning, TEXT("路径美学评分统计：总点数=%d, 平均分=%.3f, 最低分=%.3f, 最高分=%.3f, 标准差=%.3f"),
 		GlobalPathPoints.Num(), AvgScore, MinScore, MaxScore, StdDev);
+
+	// 计算路径安全距离
+	AnalyzePathSafetyDistances(GlobalPathPoints);
 
 	// 在游戏线程中更新完成信息和美学评分统计
 	AsyncTask(ENamedThreads::GameThread, [this, AvgScore, MinScore, MaxScore, StdDev]()
@@ -4081,6 +4089,202 @@ float ADroneActor1::GetClosestObstacleDistance(const FVector& Position,
 
 	return ClosestDistance;
 }
+
+
+void ADroneActor1::AnalyzePathSafetyDistances(const TArray<FPathPointWithOrientation>& Path)
+{
+	const float SafeDistance2m = 200.0f;    // 2米安全距离（厘米单位）
+	const float SafeDistance3m = 300.0f;    // 3米安全距离（厘米单位）
+	const float MaxDetectionRange = 1000.0f; // 最大检测范围，超过此范围视为"无障碍物"
+
+	if (Path.Num() == 0)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("路径为空，无法分析安全距离"));
+		return;
+	}
+
+	// 收集每个路径点的障碍物距离
+	TArray<float> ObstacleDistances;
+	ObstacleDistances.Reserve(Path.Num());
+
+	float MinDistance = TNumericLimits<float>::Max();
+	float MaxDistance = 0.0f;
+	float TotalDistance = 0.0f;
+	int32 PointsWithin2m = 0;
+	int32 PointsWithin3m = 0;
+	int32 PointsOutOfRange = 0; // 超出检测范围的点数量
+
+	// 分析每个路径点
+	for (const FPathPointWithOrientation& PathPoint : Path)
+	{
+		// 获取当前点到最近障碍物的距离
+		float ClosestObstacleDistance = GetClosestObstacleDistance(
+			PathPoint.Point,
+			InterestPoints,
+			PathPoint.AOIIndex,
+			MaxDetectionRange  // 设定最大检测范围
+		);
+
+		// 检查是否超出检测范围
+		bool bIsOutOfRange = (ClosestObstacleDistance >= TNumericLimits<float>::Max() ||
+			ClosestObstacleDistance >= MaxDetectionRange);
+
+		if (bIsOutOfRange)
+		{
+			PointsOutOfRange++;
+			// 对超出范围的点使用最大检测范围作为距离值
+			ClosestObstacleDistance = MaxDetectionRange;
+		}
+
+		// 更新统计数据
+		MinDistance = FMath::Min(MinDistance, ClosestObstacleDistance);
+		MaxDistance = FMath::Max(MaxDistance, ClosestObstacleDistance);
+
+		// 只有在未超出检测范围时才将距离添加到总计中
+		if (!bIsOutOfRange)
+		{
+			TotalDistance += ClosestObstacleDistance;
+		}
+
+		// 统计不同安全距离阈值内的点数
+		if (ClosestObstacleDistance < SafeDistance2m)
+		{
+			PointsWithin2m++;
+		}
+		if (ClosestObstacleDistance < SafeDistance3m)
+		{
+			PointsWithin3m++;
+		}
+
+		// 保存距离值
+		ObstacleDistances.Add(ClosestObstacleDistance);
+	}
+
+	// 计算有效点数（排除超出范围的点）
+	int32 ValidPoints = Path.Num() - PointsOutOfRange;
+
+	// 避免除以零的情况
+	if (ValidPoints <= 0)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("没有有效的距离测量点"));
+		ValidPoints = 1; // 防止除零错误
+	}
+
+	// 计算平均距离（仅包含有效范围内的点）
+	float AverageDistance = TotalDistance / ValidPoints;
+
+	// 计算标准差（仅考虑有效点）
+	float VarianceSum = 0.0f;
+	int32 ValidPointsForVariance = 0;
+
+	for (float Distance : ObstacleDistances)
+	{
+		// 只计算有效范围内点的方差
+		if (Distance < MaxDetectionRange)
+		{
+			VarianceSum += FMath::Square(Distance - AverageDistance);
+			ValidPointsForVariance++;
+		}
+	}
+
+	float StdDeviation = (ValidPointsForVariance > 0) ?
+		FMath::Sqrt(VarianceSum / ValidPointsForVariance) : 0.0f;
+
+	// 计算百分比
+	float PercentWithin2m = (float)PointsWithin2m / Path.Num() * 100.0f;
+	float PercentWithin3m = (float)PointsWithin3m / Path.Num() * 100.0f;
+	float PercentOutOfRange = (float)PointsOutOfRange / Path.Num() * 100.0f;
+
+	// 排序距离以计算中位数和分位数
+	ObstacleDistances.Sort();
+	float MedianDistance = ObstacleDistances[Path.Num() / 2];
+	float Q1Distance = ObstacleDistances[Path.Num() / 4];
+	float Q3Distance = ObstacleDistances[3 * Path.Num() / 4];
+
+	// 打印安全距离统计
+	UE_LOG(LogTemp, Warning, TEXT("路径安全距离分析:"));
+	UE_LOG(LogTemp, Warning, TEXT("总点数: %d (有效点: %d, 超出检测范围: %d, %.1f%%)"),
+		Path.Num(), ValidPoints, PointsOutOfRange, PercentOutOfRange);
+	UE_LOG(LogTemp, Warning, TEXT("最小距离: %.2f厘米"), MinDistance);
+	UE_LOG(LogTemp, Warning, TEXT("最大距离: %.2f厘米"), MaxDistance);
+	UE_LOG(LogTemp, Warning, TEXT("平均距离(仅有效点): %.2f厘米"), AverageDistance);
+	UE_LOG(LogTemp, Warning, TEXT("中位数距离: %.2f厘米"), MedianDistance);
+	UE_LOG(LogTemp, Warning, TEXT("距离标准差(仅有效点): %.2f厘米"), StdDeviation);
+	UE_LOG(LogTemp, Warning, TEXT("Q1分位数: %.2f厘米"), Q1Distance);
+	UE_LOG(LogTemp, Warning, TEXT("Q3分位数: %.2f厘米"), Q3Distance);
+	UE_LOG(LogTemp, Warning, TEXT("低于2米安全距离的点数: %d (%.1f%%)"), PointsWithin2m, PercentWithin2m);
+	UE_LOG(LogTemp, Warning, TEXT("低于3米安全距离的点数: %d (%.1f%%)"), PointsWithin3m, PercentWithin3m);
+
+	// 将分析添加到完成消息中
+	FString SafetyAnalysisMessage = FString::Printf(
+		TEXT("安全距离分析: 最小=%.2f厘米, 平均=%.2f厘米\n低于2米: %.1f%%, 低于3米: %.1f%%\n超出检测范围: %.1f%%"),
+		MinDistance, AverageDistance, PercentWithin2m, PercentWithin3m, PercentOutOfRange);
+
+	AsyncTask(ENamedThreads::GameThread, [this, SafetyAnalysisMessage]() {
+		GEngine->AddOnScreenDebugMessage(-1, 10.f, FColor::Yellow, SafetyAnalysisMessage);
+		});
+
+	// 将数据写入文件以供进一步分析
+	SaveSafetyDistancesToCSV(ObstacleDistances, PointsOutOfRange, MaxDetectionRange);
+}
+
+void ADroneActor1::SaveSafetyDistancesToCSV(const TArray<float>& Distances, int32 OutOfRangeCount, float MaxRange)
+{
+	FString Timestamp = FDateTime::Now().ToString(TEXT("%Y%m%d_%H%M%S"));
+	FString FileName = FString::Printf(TEXT("SafetyDistances_%s.csv"), *Timestamp);
+	FString SaveDirectory = FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("AnalysisData"));
+	FString FullPath = FPaths::Combine(SaveDirectory, FileName);
+
+	// 确保目录存在
+	IPlatformFile& PlatformFile = FPlatformFileManager::Get().GetPlatformFile();
+	if (!PlatformFile.DirectoryExists(*SaveDirectory))
+	{
+		PlatformFile.CreateDirectoryTree(*SaveDirectory);
+	}
+
+	// 准备CSV内容
+	FString CSVContent = TEXT("PointIndex,ObstacleDistance,IsOutOfRange\n");
+	int32 ValidPointCount = 0;
+	float TotalValidDistance = 0.0f;
+
+	for (int32 i = 0; i < Distances.Num(); ++i)
+	{
+		bool IsOutOfRange = (Distances[i] >= MaxRange);
+		CSVContent += FString::Printf(TEXT("%d,%.2f,%s\n"),
+			i, Distances[i], IsOutOfRange ? TEXT("true") : TEXT("false"));
+
+		if (!IsOutOfRange)
+		{
+			ValidPointCount++;
+			TotalValidDistance += Distances[i];
+		}
+	}
+
+	// 添加分析总结
+	CSVContent += TEXT("\n\nAnalysis Summary\n");
+	CSVContent += FString::Printf(TEXT("TotalPoints,%d\n"), Distances.Num());
+	CSVContent += FString::Printf(TEXT("ValidPoints,%d\n"), ValidPointCount);
+	CSVContent += FString::Printf(TEXT("OutOfRangePoints,%d\n"), OutOfRangeCount);
+	CSVContent += FString::Printf(TEXT("OutOfRangePercentage,%.2f%%\n"),
+		(float)OutOfRangeCount / Distances.Num() * 100.0f);
+
+	if (ValidPointCount > 0)
+	{
+		CSVContent += FString::Printf(TEXT("AverageDistanceOfValidPoints,%.2f\n"),
+			TotalValidDistance / ValidPointCount);
+	}
+
+	// 写入文件
+	if (FFileHelper::SaveStringToFile(CSVContent, *FullPath))
+	{
+		UE_LOG(LogTemp, Log, TEXT("安全距离数据已保存至: %s"), *FullPath);
+	}
+	else
+	{
+		UE_LOG(LogTemp, Error, TEXT("无法保存安全距离数据至: %s"), *FullPath);
+	}
+}
+
 
 
 
@@ -7029,6 +7233,8 @@ void ADroneActor1::OnReadPathFromFile() {
 
 	// 读取路径点
 	ImportPathPointsFromTxt(MostRecentFilePath);
+
+	AnalyzePathSafetyDistances(GlobalPathPoints);
 
 	// 启用路径点绘制
 	bShouldDrawPathPoints = true;
