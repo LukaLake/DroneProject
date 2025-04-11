@@ -463,6 +463,150 @@ void ADroneActor1::InitializeRenderTarget()
 }
 
 
+void ADroneActor1::PrewarmNimaModelAfterCleanup()
+{
+	bool bIsWarmupComplete = false;
+	// 检查当前是否在游戏线程上
+	if (!IsInGameThread())
+	{
+		// 如果不在游戏线程上，调度到游戏线程执行
+		AsyncTask(ENamedThreads::GameThread, [this, &bIsWarmupComplete]() {
+			if (!NimaTracker || !RenderTarget)
+			{
+				UE_LOG(LogTemp, Warning, TEXT("无法预热NIMA模型 - NimaTracker或RenderTarget未初始化"));
+				return;
+			}
+
+			UE_LOG(LogTemp, Log, TEXT("正在预热NIMA模型..."));
+
+			// 确保RenderTarget已初始化
+			InitializeRenderTarget();
+
+			// 捕获场景作为输入
+			SceneCaptureComponent->CaptureScene();
+
+			// 运行一次推理以预热模型
+			NimaTracker->RunInference(RenderTarget);
+
+			// 记录预热开始时间
+			WarmupStartTime = FPlatformTime::Seconds();
+
+			// 创建定时器句柄作为成员变量
+			// 在游戏线程中使用定时器等待结果，避免阻塞游戏线程
+
+			GetWorld()->GetTimerManager().SetTimer(
+				WarmupTimerHandle,
+				[this, &bIsWarmupComplete]() {
+					if (NimaTracker->GetNimaScore() > 0.0f)
+					{
+						// 预热成功，重置评分
+						NimaTracker->ResetNimaScore();
+						UE_LOG(LogTemp, Log, TEXT("NIMA模型预热完成"));
+
+						// 清除计时器
+						GetWorld()->GetTimerManager().ClearTimer(WarmupTimerHandle);
+						bIsWarmupComplete = true;
+					}
+					else if (FPlatformTime::Seconds() - WarmupStartTime > WarmupTimeout)
+					{
+						// 预热超时
+						UE_LOG(LogTemp, Warning, TEXT("NIMA模型预热超时"));
+
+						// 清除计时器
+						GetWorld()->GetTimerManager().ClearTimer(WarmupTimerHandle);
+						bIsWarmupComplete = true;
+					}
+				},
+				0.1f, // 每0.1秒检查一次
+				true  // 循环执行直到手动清除
+			);
+
+
+
+			});
+
+		while (!bIsWarmupComplete)
+		{
+			// 等待预热完成
+			FPlatformProcess::Sleep(0.01f);
+			if (FPlatformTime::Seconds() - WarmupStartTime > WarmupTimeout * 2)
+			{
+				// 预热超时
+				UE_LOG(LogTemp, Warning, TEXT("NIMA模型预热超时"));
+				NimaTracker->ResetState();
+				break;
+			}
+		}
+		return;
+	}
+	else {
+		if (!NimaTracker || !RenderTarget)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("无法预热NIMA模型 - NimaTracker或RenderTarget未初始化"));
+			return;
+		}
+
+		UE_LOG(LogTemp, Log, TEXT("正在预热NIMA模型..."));
+
+		// 确保RenderTarget已初始化
+		InitializeRenderTarget();
+
+		// 捕获场景作为输入
+		SceneCaptureComponent->CaptureScene();
+
+		// 运行一次推理以预热模型
+		NimaTracker->RunInference(RenderTarget);
+
+		// 记录预热开始时间
+		WarmupStartTime = FPlatformTime::Seconds();
+
+		// 创建定时器句柄作为成员变量
+		// 在游戏线程中使用定时器等待结果，避免阻塞游戏线程
+		GetWorld()->GetTimerManager().SetTimer(
+			WarmupTimerHandle,
+			[this, &bIsWarmupComplete]() {
+				if (NimaTracker->GetNimaScore() > 0.0f)
+				{
+					// 预热成功，重置评分
+					NimaTracker->ResetNimaScore();
+					UE_LOG(LogTemp, Log, TEXT("NIMA模型预热完成"));
+
+					// 清除计时器
+					GetWorld()->GetTimerManager().ClearTimer(WarmupTimerHandle);
+					bIsWarmupComplete = true;
+				}
+				else if (FPlatformTime::Seconds() - WarmupStartTime > WarmupTimeout)
+				{
+					// 预热超时
+					UE_LOG(LogTemp, Warning, TEXT("NIMA模型预热超时"));
+
+					// 清除计时器
+					GetWorld()->GetTimerManager().ClearTimer(WarmupTimerHandle);
+					bIsWarmupComplete = true;
+				}
+			},
+			0.1f, // 每0.1秒检查一次
+			true  // 循环执行直到手动清除
+		);
+
+		while (!bIsWarmupComplete)
+		{
+			// 等待预热完成
+			FPlatformProcess::Sleep(0.01f);
+			if (FPlatformTime::Seconds() - WarmupStartTime > WarmupTimeout * 2)
+			{
+				// 预热超时
+				UE_LOG(LogTemp, Warning, TEXT("NIMA模型预热超时"));
+				NimaTracker->ResetState();
+				break;
+			}
+		}
+	}
+
+}
+
+
+
 void ADroneActor1::PrecomputeAllDuration()
 {
 	GlobalFlightDurations.Empty();
@@ -1192,17 +1336,20 @@ void ADroneActor1::OnPredictAction()
 		UE_LOG(LogTemp, Warning, TEXT("Predict action using Relic triggered."));
 
 		FPathPointWithOrientation ViewPoint = { GetActorLocation(),GetActorRotation(),90.0f };
-		Force3DTilesLoad(); // 强制加载 3D Tiles
+		//Force3DTilesLoad(); // 强制加载 3D Tiles
 
 		NimaTracker->IfSaveImage = true;
 		// 在游戏线程上调用渲染函数
 		RenderViewpointToRenderTarget(ViewPoint);
 
 		// 在游戏线程上运行推理任务
-		if (NimaTracker && RenderTarget)
+		if (RenderTarget)
 		{
 			UE_LOG(LogTemp, Warning, TEXT("Running inference on the game thread."));
 			NimaTracker->RunInference(RenderTarget);
+		}
+		else if (!RenderTarget) {
+			UE_LOG(LogTemp, Warning, TEXT("RenderTarget is null"));
 		}
 
 		// 等待异步推理完成,直到获取到有效的美学评分
@@ -1222,7 +1369,7 @@ void ADroneActor1::OnPredictAction()
 			FPlatformProcess::Sleep(0.001f);
 		}
 		NimaTracker->IfSaveImage = false;
-		DisableForce3DTilesLoad();
+		//DisableForce3DTilesLoad();
 
 		if (SingleScore != 0) {
 			UE_LOG(LogTemp, Warning, TEXT("Inference successful with score of %f"), SingleScore);
@@ -1482,11 +1629,15 @@ void ADroneActor1::GenerateTraditionalOrbitPath_Internal()
 		OnPathGenerationProgress.Broadcast(60.0f, TEXT("路径点生成完成，开始计算美学评分..."));
 		});
 
+	Force3DTilesLoad(); // 强制加载3D Tiles以获得更准确的渲染
+
+	double MaxWaitTime = 40.0f; // 设置最大等待时间为10秒
+	double StartTime = FPlatformTime::Seconds();
+
 	// 异步计算美学评分和覆盖度
 	if (NimaTracker)
 	{
-		Force3DTilesLoad(); // 强制加载3D Tiles以获得更准确的渲染
-
+		NimaTracker->CleanupResources(); // 清理之前的资源
 		NimaTracker->IfSaveImage = bIsSaveImageForPrediction; // 决定是否保存美学评分的图像
 
 		// 为每个兴趣区域计算美学评分
@@ -1503,36 +1654,72 @@ void ADroneActor1::GenerateTraditionalOrbitPath_Internal()
 					{
 						// 渲染并获取美学评分
 						RenderViewpointToRenderTarget(Viewpoint);
-						if (NimaTracker)
+
+						NimaTracker->RunInference(RenderTarget);
+
+						// 等待异步推理完成,直到获取到有效的美学评分
+						const float InferenceTimeout = 5.0f; // 单个推理的超时时间
+						double InferenceStartTime = FPlatformTime::Seconds();
+						bool bInferenceSuccess = false;
+
+						while (NimaTracker->GetNimaScore() <= 0)
 						{
-							NimaTracker->RunInference(RenderTarget);
-							while (NimaTracker->GetNimaScore() <= 0)
+							FPlatformProcess::Sleep(0.001f);
+
+							// 检查单个推理是否超时
+							if (FPlatformTime::Seconds() - InferenceStartTime > InferenceTimeout)
 							{
-								FPlatformProcess::Sleep(0.001f);
+								UE_LOG(LogTemp, Warning, TEXT("Single inference timed out for viewpoint at location (%f, %f, %f)"),
+									Viewpoint.Point.X, Viewpoint.Point.Y, Viewpoint.Point.Z);
+								break;
 							}
-							Viewpoint.AestheticScore = NimaTracker->GetNimaScore();
-							NimaTracker->ResetNimaScore();
 						}
 
-						// 计算视角覆盖度
-						Viewpoint.CoverageAngle = CalculateViewpointCoverage(Viewpoint, InterestPoints[Viewpoint.AOIIndex]);
+						// 如果获取到有效评分
+						if (NimaTracker->GetNimaScore() > 0)
+						{
+							Viewpoint.AestheticScore = NimaTracker->GetNimaScore();
+							NimaTracker->ResetNimaScore(); // 重置美学评分
+
+							// 计算覆盖角度
+							Viewpoint.CoverageAngle = CalculateViewpointCoverage(Viewpoint, InterestPoints[Viewpoint.AOIIndex]);
+
+							bInferenceSuccess = true;
+						}
 
 						TaskCounter.Decrement();
 					});
 
+				// 等待当前点的美学评分计算完成，或者超时
+				double PointStartTime = FPlatformTime::Seconds();
+				const float SinglePointTimeout = 15.0f; // 单个点的最大等待时间
+
 				while (Viewpoint.AestheticScore <= 0)
 				{
 					FPlatformProcess::Sleep(0.001f);
+
+					// 检查单个点是否等待超时
+					if (FPlatformTime::Seconds() - PointStartTime > SinglePointTimeout)
+					{
+						UE_LOG(LogTemp, Warning, TEXT("Waiting for single viewpoint aesthetic score timed out"));
+						break;
+					}
 				}
 			}
 
 			while (TaskCounter.GetValue() > 0)
 			{
 				FPlatformProcess::Sleep(0.001f);
+				double CurrentTime = FPlatformTime::Seconds();
+				if (CurrentTime - StartTime > MaxWaitTime)
+				{
+					UE_LOG(LogTemp, Warning, TEXT("美学评分计算超时，跳过该区域。"));
+					break;
+				}
 			}
 		}
 
-		DisableForce3DTilesLoad();
+		//DisableForce3DTilesLoad();
 		NimaTracker->IfSaveImage = false;
 	}
 
@@ -1635,6 +1822,8 @@ void ADroneActor1::GenerateTraditionalOrbitPath_Internal()
 		GlobalPathPoints.Num(), AvgScore, MinScore, MaxScore, StdDev);
 
 	AnalyzePathSafetyDistances(GlobalPathPoints);
+
+	DisableForce3DTilesLoad();
 
 	// 在游戏线程中更新完成信息和美学评分统计
 	AsyncTask(ENamedThreads::GameThread, [this, AvgScore, MinScore, MaxScore, StdDev]() {
@@ -3261,7 +3450,7 @@ void ADroneActor1::GenerateOrbitFlightPath_Internal()
 	int numInterestPoints = 0;
 	int numOptimizedPathPoints = 0;
 
-	//Force3DTilesLoad();
+	Force3DTilesLoad();
 	// 遍历每个兴趣点
 	for (int currentAOIIndex = 0;currentAOIIndex < InterestPoints.Num();currentAOIIndex++)
 	{
@@ -3363,7 +3552,7 @@ void ADroneActor1::GenerateOrbitFlightPath_Internal()
 
 		// 遍历每个视点组合
 		int count = 0;
-		UE_LOG(LogTemp, Warning, TEXT("Computing max length"));
+		UE_LOG(LogTemp, Log, TEXT("Computing max length"));
 		for (const auto& Combination : BestViewpointCombinations)
 		{
 			//UE_LOG(LogTemp, Warning, TEXT("Processing %dof %d viewpoint combinations"), count+1, BestViewpointCombinations.Num());
@@ -3376,6 +3565,7 @@ void ADroneActor1::GenerateOrbitFlightPath_Internal()
 			MaxPathLength = FMath::Max(MaxPathLength, PathLength);
 			count++;
 		}
+		UE_LOG(LogTemp, Log, TEXT("Computing max length completed."));
 
 		// 遍历每个视点组合
 		count = 0;
@@ -3457,7 +3647,7 @@ void ADroneActor1::GenerateOrbitFlightPath_Internal()
 		GlobalBestViewPoints.Append(BestControlPoints);
 
 		// 输出现在的点数
-		UE_LOG(LogTemp, Warning, TEXT("Generated %d path points for AOI %d"),
+		UE_LOG(LogTemp, Log, TEXT("Generated %d path points for AOI %d"),
 			currentInterestArea.PathPoints.Num(), currentAOIIndex);
 	}
 
@@ -3520,7 +3710,7 @@ void ADroneActor1::GenerateOrbitFlightPath_Internal()
 
 	ExportPathPointsToWGS84Txt();
 
-	DisableForce3DTilesLoad();
+	//DisableForce3DTilesLoad();
 
 	// --- 新增：计算美学评分统计数据 ---
 	float TotalScore = 0.0f;
@@ -3582,6 +3772,8 @@ void ADroneActor1::GenerateOrbitFlightPath_Internal()
 
 	// 计算路径安全距离
 	AnalyzePathSafetyDistances(GlobalPathPoints);
+
+	DisableForce3DTilesLoad();
 
 	// 在游戏线程中更新完成信息和美学评分统计
 	AsyncTask(ENamedThreads::GameThread, [this, AvgScore, MinScore, MaxScore, StdDev]()
@@ -3894,8 +4086,9 @@ void ADroneActor1::HandleTilesetLoaded()
 
 // 强制加载所有瓦片
 void ADroneActor1::Force3DTilesLoad() {
-	TPromise<void> Promise;
-	TFuture<void> Future = Promise.GetFuture();
+	// 创建一个Promise和Future
+	TSharedPtr<TPromise<void>> Promise = MakeShared<TPromise<void>>();
+	TFuture<void> Future = Promise->GetFuture();
 
 	AsyncTask(ENamedThreads::GameThread, [this, Promise = MoveTemp(Promise)]() mutable
 		{
@@ -3909,6 +4102,8 @@ void ADroneActor1::Force3DTilesLoad() {
 					if (ACesium3DTileset* Tileset = Cast<ACesium3DTileset>(Actor))
 					{
 						Tileset->EnableFrustumCulling = false;  // 禁用视锥体剔除，强制加载所有相关瓦片
+						Tileset->EnforceCulledScreenSpaceError = true;
+						Tileset->CulledScreenSpaceError = 32.0f; // 设置剔除屏幕空间误差为0，强制加载所有瓦片
 						//Tileset->EnableFogCulling = false;      // 禁用雾剔除
 						//Tileset->SetCreatePhysicsMeshes(true);  // 确保物理碰撞体生成
 
@@ -3921,13 +4116,20 @@ void ADroneActor1::Force3DTilesLoad() {
 				UE_LOG(LogTemp, Warning, TEXT("No Cesium3DTilesets found in the world."));
 			}
 
-			// 任务完成，触发事件
-			Promise.SetValue();
+			// 完成Promise
+			Promise->SetValue();
 		});
 
 	// 等待任务完成
-	Future.Wait();
-	UE_LOG(LogTemp, Log, TEXT("Force3DTilesLoad completed."));
+	// Future.Wait();
+	// 添加超时处理
+	const float TimeoutSeconds = 2.0f;
+	if (!Future.WaitFor(FTimespan::FromSeconds(TimeoutSeconds))) {
+		UE_LOG(LogTemp, Warning, TEXT("Force3DTilesLoad timed out after %.1f seconds"), TimeoutSeconds);
+	}
+	else {
+		UE_LOG(LogTemp, Log, TEXT("Force3DTilesLoad completed."));
+	}
 }
 
 
@@ -4629,18 +4831,44 @@ void ADroneActor1::SelectBestViewpoints(
 {
 	// 复制并评分候选视点
 	TArray<FPathPointWithOrientation> ScoredViewpoints = Candidates;
+	NimaTracker->CleanupResources();
 	for (FPathPointWithOrientation& Viewpoint : ScoredViewpoints)
 	{
 		// 渲染并获取美学评分
-		RenderViewpointToRenderTarget(Viewpoint);
-		if (NimaTracker)
+		if (RenderTarget)
 		{
 			NimaTracker->RunInference(RenderTarget);
-			Viewpoint.AestheticScore = NimaTracker->GetNimaScore();
+		}
+		else if (!RenderTarget) {
+			UE_LOG(LogTemp, Warning, TEXT("RenderTarget is null"));
 		}
 
-		// 计算覆盖角度
-		Viewpoint.CoverageAngle = CalculateViewpointCoverage(Viewpoint, InterestPoints[Viewpoint.AOIIndex]);
+		// 等待异步推理完成,直到获取到有效的美学评分
+		const float InferenceTimeout = 10.0f; // 单个推理的超时时间
+		double InferenceStartTime = FPlatformTime::Seconds();
+		bool bInferenceSuccess = false;
+
+		while (NimaTracker->GetNimaScore() <= 0)
+		{
+			FPlatformProcess::Sleep(0.001f);
+
+			// 检查单个推理是否超时
+			if (FPlatformTime::Seconds() - InferenceStartTime > InferenceTimeout)
+			{
+				UE_LOG(LogTemp, Warning, TEXT("Single inference timed out for viewpoint at location (%f, %f, %f)"),
+					Viewpoint.Point.X, Viewpoint.Point.Y, Viewpoint.Point.Z);
+				break;
+			}
+		}
+		// 如果获取到有效评分
+		if (NimaTracker->GetNimaScore() > 0)
+		{
+			Viewpoint.AestheticScore = NimaTracker->GetNimaScore();
+			NimaTracker->ResetNimaScore(); // 重置美学评分
+			// 计算覆盖角度
+			Viewpoint.CoverageAngle = CalculateViewpointCoverage(Viewpoint, InterestPoints[Viewpoint.AOIIndex]);
+			bInferenceSuccess = true;
+		}
 	}
 
 	// 筛选美学评分高于阈值的视点
@@ -4790,46 +5018,109 @@ void ADroneActor1::SelectBestViewpointGroups(
 	FThreadSafeCounter TaskCounter(ScoredViewpoints.Num());
 	NimaTracker->IfSaveImage = bIsSaveImageForPrediction; // 决定是否保存美学评分的图像
 
-	Force3DTilesLoad(); // 强制加载3D瓦片
+	//Force3DTilesLoad(); // 强制加载3D瓦片
 	// 为每个视点创建异步推理任务
-	for (FPathPointWithOrientation& Viewpoint : ScoredViewpoints)
-	{
-		AsyncTask(ENamedThreads::GameThread, [this, &Viewpoint, &TaskCounter]()
-			{
-				// 在游戏线程上调用渲染函数
-				RenderViewpointToRenderTarget(Viewpoint);
 
-				// 在游戏线程上运行推理任务
-				if (NimaTracker && RenderTarget)
-				{
-					NimaTracker->RunInference(RenderTarget);
-				}
+	// 设置最长等待时间
+	const float MaxWaitTime = 40.0f; // 5秒
+	double StartTime = FPlatformTime::Seconds();
+	int32 TotalPoints = ScoredViewpoints.Num();
+	FThreadSafeCounter CompletedPoints(0); // 新增：记录成功完成计算的点数
 
-				// 等待异步推理完成,直到获取到有效的美学评分
-				while (NimaTracker->GetNimaScore() <= 0)
-				{
-					FPlatformProcess::Sleep(0.001f);
-				}
-
-				Viewpoint.AestheticScore = NimaTracker->GetNimaScore();
-				NimaTracker->ResetNimaScore(); // 重置美学评分
-				// 计算覆盖角度
-				Viewpoint.CoverageAngle = CalculateViewpointCoverage(Viewpoint, InterestPoints[Viewpoint.AOIIndex]);
-
-				// 异步任务完成,减少计数器
-				TaskCounter.Decrement();
-			});
-
-		while (Viewpoint.AestheticScore <= 0)
+	if (NimaTracker) {
+		NimaTracker->CleanupResources();
+		PrewarmNimaModelAfterCleanup();
+		for (FPathPointWithOrientation& Viewpoint : ScoredViewpoints)
 		{
-			FPlatformProcess::Sleep(0.001f);
+			AsyncTask(ENamedThreads::GameThread, [this, &Viewpoint, &TaskCounter, &CompletedPoints]()
+				{
+					// 在游戏线程上调用渲染函数
+					RenderViewpointToRenderTarget(Viewpoint);
+
+					// 在游戏线程上运行推理任务
+					if (RenderTarget)
+					{
+						NimaTracker->RunInference(RenderTarget);
+					}
+					else if (!RenderTarget) {
+						UE_LOG(LogTemp, Warning, TEXT("RenderTarget is null"));
+					}
+
+					// 等待异步推理完成,直到获取到有效的美学评分
+					const float InferenceTimeout = 10.0f; // 单个推理的超时时间
+					double InferenceStartTime = FPlatformTime::Seconds();
+					bool bInferenceSuccess = false;
+
+					while (NimaTracker->GetNimaScore() <= 0)
+					{
+						FPlatformProcess::Sleep(0.001f);
+
+						// 检查单个推理是否超时
+						if (FPlatformTime::Seconds() - InferenceStartTime > InferenceTimeout)
+						{
+							UE_LOG(LogTemp, Warning, TEXT("Single inference timed out for viewpoint at location (%f, %f, %f)"),
+								Viewpoint.Point.X, Viewpoint.Point.Y, Viewpoint.Point.Z);
+							break;
+						}
+					}
+
+					// 如果获取到有效评分
+					if (NimaTracker->GetNimaScore() > 0)
+					{
+						Viewpoint.AestheticScore = NimaTracker->GetNimaScore();
+						NimaTracker->ResetNimaScore(); // 重置美学评分
+
+						// 计算覆盖角度
+						Viewpoint.CoverageAngle = CalculateViewpointCoverage(Viewpoint, InterestPoints[Viewpoint.AOIIndex]);
+
+						// 增加完成计数
+						CompletedPoints.Increment();
+						bInferenceSuccess = true;
+					}
+
+					// 无论成功与否，都减少任务计数器
+					TaskCounter.Decrement();
+				});
+
+			// 等待当前点的美学评分计算完成，或者超时
+			double PointStartTime = FPlatformTime::Seconds();
+			const float SinglePointTimeout = 15.0f; // 单个点的最大等待时间
+
+			while (Viewpoint.AestheticScore <= 0)
+			{
+				FPlatformProcess::Sleep(0.001f);
+
+				// 检查单个点是否等待超时
+				if (FPlatformTime::Seconds() - PointStartTime > SinglePointTimeout)
+				{
+					UE_LOG(LogTemp, Warning, TEXT("Waiting for single viewpoint aesthetic score timed out"));
+					break;
+				}
+			}
 		}
+	}
+	else {
+		UE_LOG(LogTemp, Warning, TEXT("NimaTracker is null"));
 	}
 
 	// 等待所有异步任务完成
 	while (TaskCounter.GetValue() > 0)
 	{
 		FPlatformProcess::Sleep(0.001f);
+
+		// 检查是否超过全局最大等待时间
+		if (FPlatformTime::Seconds() - StartTime > MaxWaitTime)
+		{
+			int32 RemainingTasks = TaskCounter.GetValue();
+			int32 SuccessfullyCompletedPoints = CompletedPoints.GetValue();
+
+			UE_LOG(LogTemp, Warning, TEXT("Global wait timed out. Successfully completed %d/%d points (%d%%). %d tasks still pending."),
+				SuccessfullyCompletedPoints, TotalPoints,
+				TotalPoints > 0 ? (SuccessfullyCompletedPoints * 100 / TotalPoints) : 0,
+				RemainingTasks);
+
+			break;
+		}
 	}
 
 	// ... (其余代码保持不变)
@@ -4837,6 +5128,8 @@ void ADroneActor1::SelectBestViewpointGroups(
 	// 筛选美学评分高于阈值的视点
 	// 以及视点是否看到了兴趣点的顶部
 	TArray<FPathPointWithOrientation> FilteredViewpoints;
+	NimaTracker->CleanupResources();
+	PrewarmNimaModelAfterCleanup();
 	for (FPathPointWithOrientation& Viewpoint : ScoredViewpoints)
 	{
 		// 获取对应的兴趣区域
@@ -4851,23 +5144,56 @@ void ADroneActor1::SelectBestViewpointGroups(
 					// 在游戏线程上调用渲染函数
 					RenderViewpointToRenderTarget(Viewpoint);
 					// 在游戏线程上运行推理任务
-					if (NimaTracker && RenderTarget)
+					if (RenderTarget)
 					{
 						NimaTracker->RunInference(RenderTarget);
 					}
+					else if (!RenderTarget) {
+						UE_LOG(LogTemp, Warning, TEXT("RenderTarget is null"));
+					}
+
 					// 等待异步推理完成,直到获取到有效的美学评分
+					const float InferenceTimeout = 10.0f; // 单个推理的超时时间
+					double InferenceStartTime = FPlatformTime::Seconds();
+					bool bInferenceSuccess = false;
+
 					while (NimaTracker->GetNimaScore() <= 0)
 					{
 						FPlatformProcess::Sleep(0.001f);
+
+						// 检查单个推理是否超时
+						if (FPlatformTime::Seconds() - InferenceStartTime > InferenceTimeout)
+						{
+							UE_LOG(LogTemp, Warning, TEXT("Single inference timed out for viewpoint at location (%f, %f, %f)"),
+								Viewpoint.Point.X, Viewpoint.Point.Y, Viewpoint.Point.Z);
+							break;
+						}
 					}
-					Viewpoint.AestheticScore = NimaTracker->GetNimaScore();
-					NimaTracker->ResetNimaScore(); // 重置美学评分
-					// 计算覆盖角度
-					Viewpoint.CoverageAngle = CalculateViewpointCoverage(Viewpoint, InterestPoints[Viewpoint.AOIIndex]);
+					// 如果获取到有效评分
+					if (NimaTracker->GetNimaScore() > 0)
+					{
+						Viewpoint.AestheticScore = NimaTracker->GetNimaScore();
+						NimaTracker->ResetNimaScore(); // 重置美学评分
+						// 计算覆盖角度
+						Viewpoint.CoverageAngle = CalculateViewpointCoverage(Viewpoint, InterestPoints[Viewpoint.AOIIndex]);
+						bInferenceSuccess = true;
+					}
 				});
+
+			// 等待当前点的美学评分计算完成，或者超时
+			double PointStartTime = FPlatformTime::Seconds();
+			const float SinglePointTimeout = 15.0f; // 单个点的最大等待时间
+
 			while (Viewpoint.AestheticScore <= 0)
 			{
 				FPlatformProcess::Sleep(0.001f);
+
+				// 检查单个点是否等待超时
+				if (FPlatformTime::Seconds() - PointStartTime > SinglePointTimeout)
+				{
+					UE_LOG(LogTemp, Warning, TEXT("Waiting for single viewpoint aesthetic score timed out"));
+					break;
+				}
 			}
 		}
 
@@ -4877,7 +5203,7 @@ void ADroneActor1::SelectBestViewpointGroups(
 		}
 	}
 
-	DisableForce3DTilesLoad(); // 恢复3D瓦片加载
+	//DisableForce3DTilesLoad(); // 恢复3D瓦片加载
 
 	NimaTracker->IfSaveImage = false;
 	UE_LOG(LogTemp, Warning, TEXT("Aesthetic Computation Completed"));
@@ -4885,7 +5211,7 @@ void ADroneActor1::SelectBestViewpointGroups(
 	// 生成视点组合
 	TArray<TArray<FPathPointWithOrientation>> ViewpointGroups;
 	GenerateViewpointGroups(FilteredViewpoints, NumViewpointsPerGroup, ViewpointGroups);
-	UE_LOG(LogTemp, Warning, TEXT("Number of viewpoint groups: %d"), ViewpointGroups.Num());
+	UE_LOG(LogTemp, Log, TEXT("Number of viewpoint groups: %d"), ViewpointGroups.Num());
 	// 筛选满足覆盖度和距离约束的视点组合
 	TArray<TArray<FPathPointWithOrientation>> ValidViewpointGroups;
 	for (const auto& Group : ViewpointGroups)
@@ -4899,9 +5225,21 @@ void ADroneActor1::SelectBestViewpointGroups(
 	// 如果没有满足约束条件的视点组合,返回空数组
 	if (ValidViewpointGroups.Num() == 0)
 	{
-		OutViewpointGroups.Empty();
-		UE_LOG(LogTemp, Warning, TEXT("No valid viewpoint groups found"));
-		return;
+		UE_LOG(LogTemp, Warning, TEXT("No valid viewpoint combinations found. Trying to increase the number of required viewpoints."));
+		GenerateViewpointGroups(FilteredViewpoints, NumViewpointsPerGroup, ViewpointGroups,4000);
+		for (const auto& Group : ViewpointGroups)
+		{
+			if (IsCoverageSatisfied(Group) && IsDistanceSatisfied(Group))
+			{
+				ValidViewpointGroups.Add(Group);
+			}
+		}
+		if (ValidViewpointGroups.Num() == 0) {
+			UE_LOG(LogTemp, Warning, TEXT("No valid viewpoint combinations found after increasing the number of required viewpoints."));
+			OutViewpointGroups.Empty();
+			return;
+		}
+
 	}
 
 	// 计算每个视点组合的美学评分
@@ -4936,7 +5274,7 @@ void ADroneActor1::GenerateViewpointGroups(
 	const int32 NumViewpoints = Viewpoints.Num();
 
 	// 生成所有可能的视点组合
-	UE_LOG(LogTemp, Warning, TEXT("Number of viewpoints: %d"), NumViewpoints);
+	UE_LOG(LogTemp, Log, TEXT("Number of viewpoints: %d"), NumViewpoints);
 
 	// 计算可能的总组合数
 	int64 TotalPossibleCombinations = 1;
@@ -5036,7 +5374,7 @@ void ADroneActor1::GenerateViewpointGroups(
 		OutViewpointGroups.Add(ScoredViewpointGroups[i].Value);
 	}
 
-	UE_LOG(LogTemp, Warning, TEXT("Generated %d viewpoint groups out of %lld possible combinations"),
+	UE_LOG(LogTemp, Log, TEXT("Generated %d viewpoint groups out of %lld possible combinations"),
 		OutViewpointGroups.Num(), TotalPossibleCombinations);
 }
 
@@ -5091,7 +5429,7 @@ FVector ComputeSimpleBottomEdgeEndpoint(
 	// 或许使用中心而不是底部更宽泛一些
 	FVector BottomEdgePoint = InterestPoint.BottomCenter + Dir * InterestPoint.Radius;
 	// 确保高度与底部一致
-	BottomEdgePoint.Z = BottomZ;
+	BottomEdgePoint.Z = BottomZ + 100.0f; // +50.0f是为了避免设置的时候卡到障碍物底下
 
 	return BottomEdgePoint;
 }
@@ -5694,7 +6032,7 @@ TArray<FPathPointWithOrientation> ADroneActor1::GenerateSplinePath(
 		OutSplinePoints.Add(SplinePoint);
 	}
 
-	UE_LOG(LogTemp, Warning, TEXT("Spline points generated: %d"), OutSplinePoints.Num());
+	UE_LOG(LogTemp, Log, TEXT("Spline points generated: %d"), OutSplinePoints.Num());
 
 	// 基于距离简化样条点
 	TArray<FPathPointWithOrientation> SimplifiedSplinePoints;
@@ -5732,53 +6070,112 @@ TArray<FPathPointWithOrientation> ADroneActor1::GenerateSplinePath(
 	}
 	// 将结果覆盖到 OutSplinePoints
 	OutSplinePoints = SimplifiedSplinePoints;
-	UE_LOG(LogTemp, Warning, TEXT("Simplified spline points: %d"), OutSplinePoints.Num());
+	UE_LOG(LogTemp, Log, TEXT("Simplified spline points: %d"), OutSplinePoints.Num());
 
 
 	// 异步计算美学评分
 	FThreadSafeCounter TaskCounter(OutSplinePoints.Num());
-	Force3DTilesLoad();
-	for (FPathPointWithOrientation& Viewpoint : OutSplinePoints)
-	{
-		AsyncTask(ENamedThreads::GameThread, [this, &Viewpoint, &TaskCounter]()
-			{
-				RenderViewpointToRenderTarget(Viewpoint);
-				if (NimaTracker && RenderTarget)
-				{
-					NimaTracker->RunInference(RenderTarget);
-				}
-
-				while (NimaTracker->GetNimaScore() <= 0)
-				{
-					FPlatformProcess::Sleep(0.001f);
-				}
-
-				Viewpoint.AestheticScore = NimaTracker->GetNimaScore();
-				NimaTracker->ResetNimaScore();
-
-				if (Viewpoint.AOIIndex >= 0 && Viewpoint.AOIIndex < InterestPoints.Num())
-				{
-					Viewpoint.CoverageAngle = CalculateViewpointCoverage(Viewpoint, InterestPoints[Viewpoint.AOIIndex]);
-				}
-				else
-				{
-					Viewpoint.CoverageAngle = 0.0f;
-				}
-
-				TaskCounter.Decrement();
-			});
-
-		while (Viewpoint.AestheticScore <= 0)
+	//Force3DTilesLoad();
+	double MaxWaitTime = 40.0f; // 设置最大等待时间为10秒
+	double StartTime = FPlatformTime::Seconds();
+	int32 TotalPoints = OutSplinePoints.Num();
+	FThreadSafeCounter CompletedPoints(0); // 新增：记录成功完成计算的点数
+	if (NimaTracker) {
+		NimaTracker->CleanupResources();
+		PrewarmNimaModelAfterCleanup();
+		for (FPathPointWithOrientation& Viewpoint : OutSplinePoints)
 		{
-			FPlatformProcess::Sleep(0.001f);
+			AsyncTask(ENamedThreads::GameThread, [this, &Viewpoint, &TaskCounter, &CompletedPoints]()
+				{
+					RenderViewpointToRenderTarget(Viewpoint);
+					if (RenderTarget)
+					{
+						NimaTracker->RunInference(RenderTarget);
+					}
+					else if (!RenderTarget) {
+						UE_LOG(LogTemp, Warning, TEXT("RenderTarget is null"));
+					}
+
+					// 等待异步推理完成,直到获取到有效的美学评分
+					const float InferenceTimeout = 5.0f; // 单个推理的超时时间
+					double InferenceStartTime = FPlatformTime::Seconds();
+					bool bInferenceSuccess = false;
+
+					while (NimaTracker->GetNimaScore() <= 0)
+					{
+						FPlatformProcess::Sleep(0.001f);
+
+						// 检查单个推理是否超时
+						if (FPlatformTime::Seconds() - InferenceStartTime > InferenceTimeout)
+						{
+							UE_LOG(LogTemp, Warning, TEXT("Single inference timed out for viewpoint at location (%f, %f, %f)"),
+								Viewpoint.Point.X, Viewpoint.Point.Y, Viewpoint.Point.Z);
+							break;
+						}
+					}
+
+					// 如果获取到有效评分
+					if (NimaTracker->GetNimaScore() > 0)
+					{
+						Viewpoint.AestheticScore = NimaTracker->GetNimaScore();
+						NimaTracker->ResetNimaScore(); // 重置美学评分
+
+						if (Viewpoint.AOIIndex >= 0 && Viewpoint.AOIIndex < InterestPoints.Num())
+						{
+							Viewpoint.CoverageAngle = CalculateViewpointCoverage(Viewpoint, InterestPoints[Viewpoint.AOIIndex]);
+						}
+						else
+						{
+							Viewpoint.CoverageAngle = 0.0f;
+						}
+						bInferenceSuccess = true;
+						CompletedPoints.Increment(); // 记录成功完成计算的点数
+					}
+
+					TaskCounter.Decrement();
+				});
+
+			// 等待当前点的美学评分计算完成，或者超时
+			double PointStartTime = FPlatformTime::Seconds();
+			const float SinglePointTimeout = 10.0f; // 单个点的最大等待时间
+
+			while (Viewpoint.AestheticScore <= 0)
+			{
+				FPlatformProcess::Sleep(0.001f);
+
+				// 检查单个点是否等待超时
+				if (FPlatformTime::Seconds() - PointStartTime > SinglePointTimeout)
+				{
+					UE_LOG(LogTemp, Warning, TEXT("Waiting for single viewpoint aesthetic score timed out"));
+					break;
+				}
+			}
 		}
+	}
+	else {
+		UE_LOG(LogTemp, Warning, TEXT("NimaTracker is null"));
 	}
 
 	while (TaskCounter.GetValue() > 0)
 	{
 		FPlatformProcess::Sleep(0.001f);
+		// 设置超时
+		// 检查是否超过全局最大等待时间
+		if (FPlatformTime::Seconds() - StartTime > MaxWaitTime)
+		{
+			int32 RemainingTasks = TaskCounter.GetValue();
+			int32 SuccessfullyCompletedPoints = CompletedPoints.GetValue();
+
+			UE_LOG(LogTemp, Warning, TEXT("Global wait timed out. Successfully completed %d/%d points (%d%%). %d tasks still pending."),
+				SuccessfullyCompletedPoints, TotalPoints,
+				TotalPoints > 0 ? (SuccessfullyCompletedPoints * 100 / TotalPoints) : 0,
+				RemainingTasks);
+
+			break;
+		}
+
 	}
-	DisableForce3DTilesLoad();
+	//DisableForce3DTilesLoad();
 
 	return ControlPoints;
 }
@@ -6251,7 +6648,7 @@ bool ADroneActor1::BuildAndProcessPathSegment(
 
 	TArray<FVector> LocalOptimizedPath;
 	// 建议修改为
-	float _StepSize = FMath::Min(FVector::Distance(StartPos, EndPos) * 0.1f, 1000.0f);
+	float _StepSize = FMath::Min(FVector::Distance(StartPos, EndPos) * 0.1f, 300.0f);
 	_StepSize = FMath::Max(_StepSize, 200.0f); // 增大最小步长
 	double _NeighborRadius = FMath::Max(_StepSize * 3.0, 20000.0f); // 更大的邻居搜索半径可以提高路径质量
 	TArray<FPathPointWithOrientation> RRTPath = LocalRRTClass->GenerateAndSmoothRRTPath(
@@ -6401,49 +6798,106 @@ bool ADroneActor1::BuildAndProcessPathSegment(
 
 	// 异步计算美学评分
 	FThreadSafeCounter TaskCounter(RRTPath.Num());
-	Force3DTilesLoad(); // 确保3DTiles加载完成
-	for (FPathPointWithOrientation& Viewpoint : RRTPath)
-	{
-		AsyncTask(ENamedThreads::GameThread, [this, &Viewpoint, &TaskCounter]()
-			{
-				RenderViewpointToRenderTarget(Viewpoint);
-				if (NimaTracker && RenderTarget)
-				{
-					NimaTracker->RunInference(RenderTarget);
-				}
-
-				while (NimaTracker->GetNimaScore() <= 0)
-				{
-					FPlatformProcess::Sleep(0.001f);
-				}
-
-				Viewpoint.AestheticScore = NimaTracker->GetNimaScore();
-				NimaTracker->ResetNimaScore();
-
-				if (Viewpoint.AOIIndex >= 0 && Viewpoint.AOIIndex < InterestPoints.Num())
-				{
-					Viewpoint.CoverageAngle = CalculateViewpointCoverage(Viewpoint, InterestPoints[Viewpoint.AOIIndex]);
-				}
-				else
-				{
-					Viewpoint.CoverageAngle = 0.0f;
-				}
-
-				TaskCounter.Decrement();
-			});
-
-		while (Viewpoint.AestheticScore <= 0)
+	double MaxWaitTime = 40.0f; // 设置最大等待时间为10秒
+	double StartTime = FPlatformTime::Seconds();
+	int32 TotalPoints = RRTPath.Num();
+	FThreadSafeCounter CompletedPoints(0); // 新增：记录成功完成计算的点数
+	//Force3DTilesLoad(); // 确保3DTiles加载完成
+	if (NimaTracker) {
+		//NimaTracker->CleanupResources();
+		for (FPathPointWithOrientation& Viewpoint : RRTPath)
 		{
-			FPlatformProcess::Sleep(0.001f);
+			AsyncTask(ENamedThreads::GameThread, [this, &Viewpoint, &TaskCounter, &CompletedPoints]()
+				{
+					RenderViewpointToRenderTarget(Viewpoint);
+					if (RenderTarget)
+					{
+						NimaTracker->RunInference(RenderTarget);
+					}
+					else if (!RenderTarget) {
+						UE_LOG(LogTemp, Warning, TEXT("RenderTarget is null"));
+					}
+
+					// 等待异步推理完成,直到获取到有效的美学评分
+					const float InferenceTimeout = 5.0f; // 单个推理的超时时间
+					double InferenceStartTime = FPlatformTime::Seconds();
+					bool bInferenceSuccess = false;
+
+					while (NimaTracker->GetNimaScore() <= 0)
+					{
+						FPlatformProcess::Sleep(0.001f);
+
+						// 检查单个推理是否超时
+						if (FPlatformTime::Seconds() - InferenceStartTime > InferenceTimeout)
+						{
+							UE_LOG(LogTemp, Warning, TEXT("Single inference timed out for viewpoint at location (%f, %f, %f)"),
+								Viewpoint.Point.X, Viewpoint.Point.Y, Viewpoint.Point.Z);
+							break;
+						}
+					}
+					// 如果获取到有效评分
+					if (NimaTracker->GetNimaScore() > 0)
+					{
+						Viewpoint.AestheticScore = NimaTracker->GetNimaScore();
+						NimaTracker->ResetNimaScore(); // 重置美学评分
+
+						if (Viewpoint.AOIIndex >= 0 && Viewpoint.AOIIndex < InterestPoints.Num())
+						{
+							Viewpoint.CoverageAngle = CalculateViewpointCoverage(Viewpoint, InterestPoints[Viewpoint.AOIIndex]);
+						}
+						else
+						{
+							Viewpoint.CoverageAngle = 0.0f;
+						}
+						bInferenceSuccess = true;
+						CompletedPoints.Increment(); // 记录成功完成计算的点数
+					}
+
+					TaskCounter.Decrement();
+				});
+
+			// 等待当前点的美学评分计算完成，或者超时
+			double PointStartTime = FPlatformTime::Seconds();
+			const float SinglePointTimeout = 10.0f; // 单个点的最大等待时间
+
+			while (Viewpoint.AestheticScore <= 0)
+			{
+				FPlatformProcess::Sleep(0.001f);
+
+				// 检查单个点是否等待超时
+				if (FPlatformTime::Seconds() - PointStartTime > SinglePointTimeout)
+				{
+					UE_LOG(LogTemp, Warning, TEXT("Waiting for single viewpoint aesthetic score timed out"));
+					break;
+				}
+			}
 		}
+	}
+	else {
+		UE_LOG(LogTemp, Warning, TEXT("NimaTracker is null"));
 	}
 
 	while (TaskCounter.GetValue() > 0)
 	{
 		FPlatformProcess::Sleep(0.001f);
+		// 设置超时
+		// 检查是否超过全局最大等待时间
+		if (FPlatformTime::Seconds() - StartTime > MaxWaitTime)
+		{
+			int32 RemainingTasks = TaskCounter.GetValue();
+			int32 SuccessfullyCompletedPoints = CompletedPoints.GetValue();
+
+			UE_LOG(LogTemp, Warning, TEXT("Global wait timed out. Successfully completed %d/%d points (%d%%). %d tasks still pending."),
+				SuccessfullyCompletedPoints, TotalPoints,
+				TotalPoints > 0 ? (SuccessfullyCompletedPoints * 100 / TotalPoints) : 0,
+				RemainingTasks);
+
+			break;
+		}
+
 	}
 
-	DisableForce3DTilesLoad(); // 恢复3DTiles加载
+	//DisableForce3DTilesLoad(); // 恢复3DTiles加载
 
 	OutCost = ComputeTransiPathCost(RRTPath, StartRegionIndex, TargetRegionIndex, PrevMidPoint, NextMidPoint);
 	// 去除RRTPath中的第一个点，因为它是StartPos
@@ -6503,7 +6957,7 @@ bool ADroneActor1::BuildRegionToEndRoute(
 
 bool ADroneActor1::BuildSTSPCostMatrix(TArray<FDoubleArray>& OutCostMatrix)
 {
-	UE_LOG(LogTemp, Warning, TEXT("Building Cost Matrix"));
+	UE_LOG(LogTemp, Log, TEXT("Building Cost Matrix"));
 
 	int32 NumRegions = InterestAreas.Num();
 	int32 NumNodes = 2 + 2 * NumRegions; // 0:Start, 1:End; 2/3:Region0 Entry/Exit; 4/5:Region1 Entry/Exit; etc.
@@ -6603,7 +7057,7 @@ bool ADroneActor1::BuildSTSPCostMatrix(TArray<FDoubleArray>& OutCostMatrix)
 				AsyncTask(ENamedThreads::GameThread, [this, CurrentProgress]() {
 					OnPathGenerationProgress.Broadcast(CurrentProgress, TEXT("Building STSP Cost Matrix..."));
 					});
-				UE_LOG(LogTemp, Warning, TEXT("Progress: %.1f%%"), CurrentProgress);
+				//UE_LOG(LogTemp, Log, TEXT("Progress: %.1f%%"), CurrentProgress);
 			}
 			//UE_LOG(LogTemp, Warning, TEXT("Building STSP Cost Matrix. Progress: %.1f%%"), CurrentProgress);
 
@@ -6698,7 +7152,10 @@ bool ADroneActor1::BuildSTSPCostMatrix(TArray<FDoubleArray>& OutCostMatrix)
 	}
 
 	FFileHelper::SaveStringToFile(CSVContent, *SavePath);
-	UE_LOG(LogTemp, Warning, TEXT("Cost Matrix saved to %s"), *SavePath);
+	UE_LOG(LogTemp, Log, TEXT("Cost Matrix saved to %s"), *SavePath);
+
+	// 清理资源
+	NimaTracker->CleanupResources();
 
 	return true;
 }
@@ -7194,7 +7651,7 @@ void ADroneActor1::OnStartFlightAlongPath()
 
 void ADroneActor1::OnReadPathFromFile() {
 
-	UE_LOG(LogTemp, Warning, TEXT("Reading path from file..."));
+	UE_LOG(LogTemp, Log, TEXT("Reading path from file..."));
 	// 获取项目目录
 	FString ProjectDir = FPaths::ProjectDir();
 

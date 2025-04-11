@@ -826,6 +826,8 @@ bool UMyRRTClass::IsTrajectoryCollisionFree(const TArray<FVector>& Trajectory,
 
                     FHitResult HitResult;
                     FCollisionQueryParams QueryParams;
+                    QueryParams.bTraceComplex = true;
+                    QueryParams.bIgnoreTouches = true;
 
                     float SphereRadius = FMath::Min(200.0f, Threshold * 2.0f);
 
@@ -1188,7 +1190,8 @@ bool UMyRRTClass::IsInObstacleLocal(const FVector& Point,
     FVector TraceEnd = Point + FVector(1.0f, 1.0f, 1.0f) * Threshold;
 
     FCollisionQueryParams QueryParams;
-    QueryParams.bTraceComplex = true; // 检测复杂碰撞对象
+    QueryParams.bTraceComplex = true;
+    QueryParams.bIgnoreTouches = true;
 
     float SphereRadius = 200.0f; // 动态设置球体半径
 
@@ -1249,7 +1252,9 @@ bool UMyRRTClass::LineIntersectsObstacles(const FVector& Start, const FVector& E
 
     float SphereRadius = 200.0f; // 动态调整球体半径
     FHitResult HitResult;
-    FCollisionQueryParams LocalQueryParams;
+    FCollisionQueryParams LocalQueryParams;;
+    LocalQueryParams.bTraceComplex = true;
+    LocalQueryParams.bIgnoreTouches = true;
 
     if (LocalWorld->SweepSingleByChannel(
         HitResult,
@@ -1583,8 +1588,8 @@ TArray<FPathPointWithOrientation> UMyRRTClass::GenerateAndSmoothRRTPath(
     FVector BoxExtent = BoundingBox.GetExtent();
 
     // 定义扩展比例和固定高度扩展值
-    float HorizontalExpansionRatio = 0.2f; // 水平方向扩展比例（X 和 Y）
-    float FixedVerticalExpansion = 2000.0f; // 高度方向固定扩展值
+    float HorizontalExpansionRatio = 0.5f; // 水平方向扩展比例（X 和 Y）
+    float FixedVerticalExpansion = 5000.0f; // 高度方向固定扩展值
 
     // 计算水平方向的扩展值
     FVector Expansion(

@@ -377,12 +377,22 @@ public:
 
 	void ResetNimaScore();
 
+    void ResetState();
+
+    void CleanupResources();
+    void CleanupResourcesInternal();
+
+    void SaveImageToFile(const cv::Mat& Image, float _Score);
+
     bool IfSaveImage = false;
 private:
 	bool ParseNimaInput(UTextureRenderTarget2D* RenderTarget, TArray<float>& ProcessedData, cv::Mat& BGRImage);
-    void ParseNimaOutput(const TArray<float>& OutputData, float& Score);
+    void ParseNimaOutput(const TArray<float>& OutputData, float& _Score);
 
     mutable FCriticalSection InferenceCriticalSection;
 
     float Score=0;
+
+    // 添加到 NimaObjectTracker 类的 private 部分
+    bool bIsCleaningUp = false; // 标记资源正在清理中
 };

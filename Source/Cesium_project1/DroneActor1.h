@@ -220,6 +220,7 @@ public:
     // 初始化渲染目标
     void InitializeRenderTarget();
 
+    void PrewarmNimaModelAfterCleanup();
     // 渲染视点到RenderTarget
     void RenderViewpointToRenderTarget(const FPathPointWithOrientation& Viewpoint);
 
@@ -761,7 +762,9 @@ private:
     // 互斥锁
     FCriticalSection PathMutex;
 
-
+    // 模型初始化
+    double WarmupStartTime;
+    const float WarmupTimeout = 10.0f;
 
 	// ====================================================================================
     // 手动记录的路径点集合
@@ -771,6 +774,8 @@ private:
     bool bIsManualRecordingPath;
 
     // 记录点的最小间隔时间(秒)，防止重复记录
+    // 用于模型预热的计时器句柄和相关变量
+    FTimerHandle WarmupTimerHandle;
     float ManualRecordCooldown;
     float LastRecordTime;
 };
