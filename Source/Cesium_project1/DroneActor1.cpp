@@ -317,7 +317,7 @@ void ADroneActor1::BeginPlay()
 	UE_LOG(LogTemp, Warning, TEXT("YOLO Model Path: %s"), *ModelPath_Yolo);
 
 	// Initialize the YoloObjectTracker
-	YoloTracker = MakeShared<YoloObjectTracker>(ModelPath_Yolo);
+	//YoloTracker = MakeShared<YoloObjectTracker>(ModelPath_Yolo); 
 
 	/*if (!YoloTracker->Initialize())
 	{
@@ -369,11 +369,23 @@ void ADroneActor1::EndPlay(const EEndPlayReason::Type EndPlayReason)
 			bIsTrackingActive = false;
 		}
 		YoloTracker.Reset();
+		YoloTracker=nullptr;
 	}
 	if (NimaTracker)
 	{
 		NimaTracker.Reset();
+		YoloTracker = nullptr;
 	}
+
+	// 显式调用显存释放命令
+	ENQUEUE_RENDER_COMMAND(FlushGPUResources)(
+		[](FRHICommandListImmediate& RHICmdList)
+		{
+			RHICmdList.ImmediateFlush(EImmediateFlushType::FlushRHIThreadFlushResources);
+		});
+
+	// 强制垃圾回收
+	GEngine->ForceGarbageCollection(true);
 }
 
 void ADroneActor1::BeginDestroy()
@@ -1089,48 +1101,48 @@ void ADroneActor1::Tick(float DeltaTime)
 	{
 		TimeSinceLastInference = 0.0f; // 重置累积时间
 
-		if ((!YoloTracker->IsInferencing()) && YoloTracker->bIsInitialized && bIsTrackingActive && (!YoloTracker->ShouldStopTracking()))
-		{
-			// 创建或重用 RenderTarget
-			if (!RenderTarget)
-			{
-				RenderTarget = NewObject<UTextureRenderTarget2D>(this, TEXT("ScreenShot"));
-				RenderTarget->InitAutoFormat(ViewportWidth, ViewportHeight);
-				RenderTarget->UpdateResourceImmediate(true);
-				SceneCaptureComponent->TextureTarget = RenderTarget;
+		//if ((!YoloTracker->IsInferencing()) && YoloTracker->bIsInitialized && bIsTrackingActive && (!YoloTracker->ShouldStopTracking()))
+		//{
+		//	// 创建或重用 RenderTarget
+		//	if (!RenderTarget)
+		//	{
+		//		RenderTarget = NewObject<UTextureRenderTarget2D>(this, TEXT("ScreenShot"));
+		//		RenderTarget->InitAutoFormat(ViewportWidth, ViewportHeight);
+		//		RenderTarget->UpdateResourceImmediate(true);
+		//		SceneCaptureComponent->TextureTarget = RenderTarget;
 
-				//// 配置 SceneCaptureComponent 以确保捕捉正确的渲染内容
-				SceneCaptureComponent->CaptureSource = ESceneCaptureSource::SCS_FinalColorLDR;
+		//		//// 配置 SceneCaptureComponent 以确保捕捉正确的渲染内容
+		//		SceneCaptureComponent->CaptureSource = ESceneCaptureSource::SCS_FinalColorLDR;
 
-				//// 调整后处理设置，避免过度曝光
-				//SceneCaptureComponent->PostProcessSettings.bOverride_AutoExposureMethod = true;
-				//SceneCaptureComponent->PostProcessSettings.AutoExposureMethod = EAutoExposureMethod::AEM_Manual;
-				//SceneCaptureComponent->PostProcessSettings.AutoExposureBias = 0.0f; // 根据需要调整
+		//		//// 调整后处理设置，避免过度曝光
+		//		//SceneCaptureComponent->PostProcessSettings.bOverride_AutoExposureMethod = true;
+		//		//SceneCaptureComponent->PostProcessSettings.AutoExposureMethod = EAutoExposureMethod::AEM_Manual;
+		//		//SceneCaptureComponent->PostProcessSettings.AutoExposureBias = 0.0f; // 根据需要调整
 
-				//// 设置 RenderTarget 的清除颜色为黑色，避免背景白色
-				//RenderTarget->ClearColor = FLinearColor::Black;
+		//		//// 设置 RenderTarget 的清除颜色为黑色，避免背景白色
+		//		//RenderTarget->ClearColor = FLinearColor::Black;
 
-				//SceneCaptureComponent->PostProcessSettings.bOverride_BloomIntensity = true;
-				//SceneCaptureComponent->PostProcessSettings.BloomIntensity = 1.0f; // 根据需要调整
+		//		//SceneCaptureComponent->PostProcessSettings.bOverride_BloomIntensity = true;
+		//		//SceneCaptureComponent->PostProcessSettings.BloomIntensity = 1.0f; // 根据需要调整
 
-				UE_LOG(LogTemp, Log, TEXT("RenderTarget initialized with size: %dx%d"), ViewportWidth, ViewportHeight);
-			}
+		//		UE_LOG(LogTemp, Log, TEXT("RenderTarget initialized with size: %dx%d"), ViewportWidth, ViewportHeight);
+		//	}
 
-			SceneCaptureComponent->CaptureScene();
-			LastTrackedPosition = YoloTracker->GetTrackedPosition();
+		//	SceneCaptureComponent->CaptureScene();
+		//	LastTrackedPosition = YoloTracker->GetTrackedPosition();
 
-			if (RenderTarget)
-			{
-				YoloTracker->RunInference(RenderTarget, LastTrackedPosition);
-			}
+		//	if (RenderTarget)
+		//	{
+		//		YoloTracker->RunInference(RenderTarget, LastTrackedPosition);
+		//	}
 
-			if (!YoloTracker->IsTracking())
-			{
-				YoloTracker->StopTracking();
-				bIsTrackingActive = false;
-				UE_LOG(LogTemp, Warning, TEXT("Track Lost."));
-			}
-		}
+		//	if (!YoloTracker->IsTracking())
+		//	{
+		//		YoloTracker->StopTracking();
+		//		bIsTrackingActive = false;
+		//		UE_LOG(LogTemp, Warning, TEXT("Track Lost."));
+		//	}
+		//}
 	}
 
 }
@@ -1650,45 +1662,46 @@ void ADroneActor1::GenerateTraditionalOrbitPath_Internal()
 			{
 				FPathPointWithOrientation& Viewpoint = Area.PathPoints[i];
 
-				AsyncTask(ENamedThreads::GameThread, [this, &Viewpoint, &TaskCounter, i, TotalPoints]()
-					{
-						// 渲染并获取美学评分
-						RenderViewpointToRenderTarget(Viewpoint);
+				FEvent* RenderCompleteEvent = FPlatformProcess::CreateSynchEvent(false);
 
+				// 在游戏线程中执行渲染
+				AsyncTask(ENamedThreads::GameThread, [this, &Viewpoint, RenderCompleteEvent]()
+					{
+						RenderViewpointToRenderTarget(Viewpoint);
+						RenderCompleteEvent->Trigger(); // 渲染完成后触发事件
+					});
+
+				// 在后台线程中等待渲染完成
+				AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, [this, &Viewpoint, &TaskCounter, RenderCompleteEvent]()
+					{
+						RenderCompleteEvent->Wait(); // 等待渲染完成
+
+						// 推理逻辑
 						NimaTracker->RunInference(RenderTarget);
 
-						// 等待异步推理完成,直到获取到有效的美学评分
-						const float InferenceTimeout = 5.0f; // 单个推理的超时时间
+						// 等待推理完成
+						const float InferenceTimeout = 5.0f;
 						double InferenceStartTime = FPlatformTime::Seconds();
-						bool bInferenceSuccess = false;
-
 						while (NimaTracker->GetNimaScore() <= 0)
 						{
 							FPlatformProcess::Sleep(0.001f);
-
-							// 检查单个推理是否超时
 							if (FPlatformTime::Seconds() - InferenceStartTime > InferenceTimeout)
 							{
-								UE_LOG(LogTemp, Warning, TEXT("Single inference timed out for viewpoint at location (%f, %f, %f)"),
-									Viewpoint.Point.X, Viewpoint.Point.Y, Viewpoint.Point.Z);
+								UE_LOG(LogTemp, Warning, TEXT("Inference timed out."));
 								break;
 							}
 						}
 
-						// 如果获取到有效评分
 						if (NimaTracker->GetNimaScore() > 0)
 						{
 							Viewpoint.AestheticScore = NimaTracker->GetNimaScore();
-							NimaTracker->ResetNimaScore(); // 重置美学评分
-
-							// 计算覆盖角度
-							Viewpoint.CoverageAngle = CalculateViewpointCoverage(Viewpoint, InterestPoints[Viewpoint.AOIIndex]);
-
-							bInferenceSuccess = true;
+							NimaTracker->ResetNimaScore();
 						}
 
 						TaskCounter.Decrement();
 					});
+
+				
 
 				// 等待当前点的美学评分计算完成，或者超时
 				double PointStartTime = FPlatformTime::Seconds();
@@ -1701,10 +1714,14 @@ void ADroneActor1::GenerateTraditionalOrbitPath_Internal()
 					// 检查单个点是否等待超时
 					if (FPlatformTime::Seconds() - PointStartTime > SinglePointTimeout)
 					{
+						// 清理事件
+						FPlatformProcess::ReturnSynchEventToPool(RenderCompleteEvent);
 						UE_LOG(LogTemp, Warning, TEXT("Waiting for single viewpoint aesthetic score timed out"));
 						break;
 					}
 				}
+				// 清理事件
+				FPlatformProcess::ReturnSynchEventToPool(RenderCompleteEvent);
 			}
 
 			while (TaskCounter.GetValue() > 0)
@@ -4084,9 +4101,56 @@ void ADroneActor1::HandleTilesetLoaded()
 	}
 }
 
-// 强制加载所有瓦片
+//// 强制加载所有瓦片
+//void ADroneActor1::Force3DTilesLoad() {
+//	// 创建一个Promise和Future
+//	TSharedPtr<TPromise<void>> Promise = MakeShared<TPromise<void>>();
+//	TFuture<void> Future = Promise->GetFuture();
+//
+//	AsyncTask(ENamedThreads::GameThread, [this, Promise = MoveTemp(Promise)]() mutable
+//		{
+//			TArray<AActor*> FoundActors;
+//			UGameplayStatics::GetAllActorsOfClass(GetWorld(), ACesium3DTileset::StaticClass(), FoundActors);
+//
+//			if (FoundActors.Num() > 0)
+//			{
+//				for (AActor* Actor : FoundActors)
+//				{
+//					if (ACesium3DTileset* Tileset = Cast<ACesium3DTileset>(Actor))
+//					{
+//						Tileset->EnableFrustumCulling = false;  // 禁用视锥体剔除，强制加载所有相关瓦片
+//						Tileset->EnforceCulledScreenSpaceError = true;
+//						Tileset->CulledScreenSpaceError = 32.0f; // 设置剔除屏幕空间误差为0，强制加载所有瓦片
+//						//Tileset->EnableFogCulling = false;      // 禁用雾剔除
+//						//Tileset->SetCreatePhysicsMeshes(true);  // 确保物理碰撞体生成
+//
+//						UE_LOG(LogTemp, Log, TEXT("Tileset updated: %s"), *Tileset->GetName());
+//					}
+//				}
+//			}
+//			else
+//			{
+//				UE_LOG(LogTemp, Warning, TEXT("No Cesium3DTilesets found in the world."));
+//			}
+//
+//			// 完成Promise
+//			Promise->SetValue();
+//		});
+//
+//	// 等待任务完成
+//	// Future.Wait();
+//	// 添加超时处理
+//	const float TimeoutSeconds = 2.0f;
+//	if (!Future.WaitFor(FTimespan::FromSeconds(TimeoutSeconds))) {
+//		UE_LOG(LogTemp, Warning, TEXT("Force3DTilesLoad timed out after %.1f seconds"), TimeoutSeconds);
+//	}
+//	else {
+//		UE_LOG(LogTemp, Log, TEXT("Force3DTilesLoad completed."));
+//	}
+//}
+
+
 void ADroneActor1::Force3DTilesLoad() {
-	// 创建一个Promise和Future
 	TSharedPtr<TPromise<void>> Promise = MakeShared<TPromise<void>>();
 	TFuture<void> Future = Promise->GetFuture();
 
@@ -4097,17 +4161,107 @@ void ADroneActor1::Force3DTilesLoad() {
 
 			if (FoundActors.Num() > 0)
 			{
+				// 获取当前Actor位置
+				FVector CurrentPosition = GetActorLocation();
+				UE_LOG(LogTemp, Log, TEXT("Actor position for tile loading: (%f,%f,%f)"),
+					CurrentPosition.X, CurrentPosition.Y, CurrentPosition.Z);
+
+				// 定义加载区域半径（单位：厘米）
+				const float ForceLoadRadius = 15000.0f;  // 150米内强制加载高质量瓦片
+				const float DetailedRadius = 50000.0f;   // 500米内加载中等质量瓦片
+
 				for (AActor* Actor : FoundActors)
 				{
-					if (ACesium3DTileset* Tileset = Cast<ACesium3DTileset>(Actor))
-					{
-						Tileset->EnableFrustumCulling = false;  // 禁用视锥体剔除，强制加载所有相关瓦片
-						Tileset->EnforceCulledScreenSpaceError = true;
-						Tileset->CulledScreenSpaceError = 32.0f; // 设置剔除屏幕空间误差为0，强制加载所有瓦片
-						//Tileset->EnableFogCulling = false;      // 禁用雾剔除
-						//Tileset->SetCreatePhysicsMeshes(true);  // 确保物理碰撞体生成
+					ACesium3DTileset* Tileset = Cast<ACesium3DTileset>(Actor);
+					if (!Tileset) continue;
 
-						UE_LOG(LogTemp, Log, TEXT("Tileset updated: %s"), *Tileset->GetName());
+					// 检查瓦片集是否已被隐藏 - 如果隐藏则跳过
+					if (Tileset->IsHidden())
+					{
+						UE_LOG(LogTemp, Verbose, TEXT("Skipping hidden tileset: %s"),
+							*Tileset->GetActorNameOrLabel());
+						continue;
+					}
+
+					// 获取瓦片集的实际边界盒
+					FBox TilesetBounds = GetTilesetBounds(Tileset);
+
+					// 显示边界盒信息
+					UE_LOG(LogTemp, Verbose, TEXT("Tileset %s bounds: Min(%f,%f,%f), Max(%f,%f,%f), IsValid: %s"),
+						*Tileset->GetActorNameOrLabel(),
+						TilesetBounds.Min.X, TilesetBounds.Min.Y, TilesetBounds.Min.Z,
+						TilesetBounds.Max.X, TilesetBounds.Max.Y, TilesetBounds.Max.Z,
+						TilesetBounds.IsValid ? TEXT("True") : TEXT("False"));
+
+					// 计算点到边界盒的距离
+					float DistanceToTileset;
+
+					if (TilesetBounds.IsValid)
+					{
+						if (TilesetBounds.IsInside(CurrentPosition))
+						{
+							// 如果点在边界盒内部，距离为0
+							DistanceToTileset = 0.0f;
+						}
+						else
+						{
+							// 手动计算点到边界盒的最短距离
+							FVector ClosestPoint = TilesetBounds.GetClosestPointTo(CurrentPosition);
+							DistanceToTileset = FVector::Dist(CurrentPosition, ClosestPoint);
+						}
+					}
+					else
+					{
+						// 如果边界盒无效，退回到使用Actor位置的距离计算
+						DistanceToTileset = FVector::Dist(CurrentPosition, Tileset->GetActorLocation());
+					}
+
+					// 检查Tileset名称是否暗示它是世界级底图
+					FString TilesetName = Tileset->GetActorNameOrLabel().ToLower();
+					bool bIsWorldTileset =
+						TilesetName.Contains(TEXT("world")) ||
+						TilesetName.Contains(TEXT("globe")) ||
+						TilesetName.Contains(TEXT("terrain")) ||
+						TilesetName.Contains(TEXT("basemap"));
+
+					// 检查边界盒大小是否暗示世界级地形
+					bool bLargeBounds = false;
+					if (TilesetBounds.IsValid)
+					{
+						FVector BoundsSize = TilesetBounds.GetSize();
+						// 如果任何维度超过10公里(1,000,000厘米)，则可能是世界级地形
+						bLargeBounds = BoundsSize.GetMax() > 1000000.0f;
+					}
+
+					// 决定如何处理瓦片
+					if (DistanceToTileset <= ForceLoadRadius)
+					{
+						// 近距离：完全禁用剔除，强制加载高质量瓦片
+						Tileset->EnableFrustumCulling = false;
+						Tileset->EnforceCulledScreenSpaceError = true;
+						Tileset->CulledScreenSpaceError = 16.0f;  // 低错误值 = 高质量
+
+						UE_LOG(LogTemp, Log, TEXT("Forcing high quality load for nearby tileset: %s (distance: %.1fm)"),
+							*Tileset->GetActorNameOrLabel(), DistanceToTileset / 100.0f);
+					}
+					else if (bIsWorldTileset || bLargeBounds || DistanceToTileset <= DetailedRadius)
+					{
+						// 中等距离或世界级Tileset：禁用视锥体剔除，但使用中等质量
+						Tileset->EnableFrustumCulling = false;
+						Tileset->EnforceCulledScreenSpaceError = true;
+						Tileset->CulledScreenSpaceError = 32.0f;  // 中等错误值 = 中等质量
+
+						UE_LOG(LogTemp, Log, TEXT("Loading medium quality for tileset: %s (distance: %.1fm, isWorld: %s, isLarge: %s)"),
+							*Tileset->GetActorNameOrLabel(),
+							DistanceToTileset / 100.0f,
+							bIsWorldTileset ? TEXT("True") : TEXT("False"),
+							bLargeBounds ? TEXT("True") : TEXT("False"));
+					}
+					else
+					{
+						// 远距离：保持默认设置，允许正常剔除
+						UE_LOG(LogTemp, Log, TEXT("Keeping default settings for distant tileset: %s (distance: %.1fm)"),
+							*Tileset->GetActorNameOrLabel(), DistanceToTileset / 100.0f);
 					}
 				}
 			}
@@ -4120,10 +4274,8 @@ void ADroneActor1::Force3DTilesLoad() {
 			Promise->SetValue();
 		});
 
-	// 等待任务完成
-	// Future.Wait();
 	// 添加超时处理
-	const float TimeoutSeconds = 2.0f;
+	const float TimeoutSeconds = 4.0f;
 	if (!Future.WaitFor(FTimespan::FromSeconds(TimeoutSeconds))) {
 		UE_LOG(LogTemp, Warning, TEXT("Force3DTilesLoad timed out after %.1f seconds"), TimeoutSeconds);
 	}
@@ -4131,6 +4283,103 @@ void ADroneActor1::Force3DTilesLoad() {
 		UE_LOG(LogTemp, Log, TEXT("Force3DTilesLoad completed."));
 	}
 }
+
+// 获取瓦片集的边界盒的辅助函数
+FBox ADroneActor1::GetTilesetBounds(ACesium3DTileset* Tileset)
+{
+	if (!Tileset)
+		return FBox(ForceInit); // 返回无效边界盒
+
+	FBox CombinedBounds(ForceInit);
+	bool bFoundValidBounds = false;
+
+	// 方法1：检查所有子组件的边界
+	TArray<UPrimitiveComponent*> PrimitiveComponents;
+	Tileset->GetComponents<UPrimitiveComponent>(PrimitiveComponents);
+
+	for (UPrimitiveComponent* Component : PrimitiveComponents)
+	{
+		if (Component && Component->IsVisible())
+		{
+			// 获取组件的世界空间边界
+			FBoxSphereBounds ComponentBounds = Component->Bounds;
+
+			if (ComponentBounds.SphereRadius > KINDA_SMALL_NUMBER)
+			{
+				// 创建组件的AABB
+				FBox ComponentBox = ComponentBounds.GetBox();
+
+				// 合并边界
+				if (!bFoundValidBounds)
+				{
+					CombinedBounds = ComponentBox;
+					bFoundValidBounds = true;
+				}
+				else
+				{
+					CombinedBounds += ComponentBox;
+				}
+			}
+		}
+	}
+
+	// 方法2：如果没有找到组件边界，获取所有渲染子组件的边界
+	if (!bFoundValidBounds)
+	{
+		TArray<USceneComponent*> ChildComponents;
+		Tileset->GetRootComponent()->GetChildrenComponents(true, ChildComponents);
+
+		for (USceneComponent* Child : ChildComponents)
+		{
+			UPrimitiveComponent* PrimitiveChild = Cast<UPrimitiveComponent>(Child);
+			if (PrimitiveChild && PrimitiveChild->IsVisible())
+			{
+				FBoxSphereBounds ChildBounds = PrimitiveChild->Bounds;
+				if (ChildBounds.SphereRadius > KINDA_SMALL_NUMBER)
+				{
+					FBox ChildBox = ChildBounds.GetBox();
+
+					if (!bFoundValidBounds)
+					{
+						CombinedBounds = ChildBox;
+						bFoundValidBounds = true;
+					}
+					else
+					{
+						CombinedBounds += ChildBox;
+					}
+				}
+			}
+		}
+	}
+
+	// 方法3：如果仍未找到有效边界，基于Tileset名称估计一个保守的边界
+	if (!bFoundValidBounds)
+	{
+		FVector TilesetLocation = Tileset->GetActorLocation();
+		FString TilesetName = Tileset->GetActorNameOrLabel().ToLower();
+
+		// 根据名称设置不同大小的边界盒
+		if (TilesetName.Contains(TEXT("world")) ||
+			TilesetName.Contains(TEXT("globe")) ||
+			TilesetName.Contains(TEXT("terrain")) ||
+			TilesetName.Contains(TEXT("basemap")))
+		{
+			// 世界级瓦片集 - 使用非常大的边界盒
+			CombinedBounds = FBox(TilesetLocation - FVector(5000000), TilesetLocation + FVector(5000000));
+		}
+		else
+		{
+			// 局部瓦片集 - 使用中等边界盒，以Tileset位置为中心
+			CombinedBounds = FBox(TilesetLocation - FVector(50000), TilesetLocation + FVector(50000));
+		}
+
+		bFoundValidBounds = true;
+	}
+
+	return CombinedBounds;
+}
+
 
 
 // 禁用强制加载3D瓦片	

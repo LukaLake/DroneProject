@@ -17,7 +17,11 @@
 #include "Public/MyTSPClass.h"
 #include "Public/MyUtil.h"
 #include "Public/MyRRTClass.h"
+
+#include "Cesium3DTileset.h"
+
 #include "DroneActor1.generated.h"
+
 
 // 委托声明
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnPathGenerationProgress, float, Progress, const FString&, Status);
@@ -226,6 +230,7 @@ public:
 
     // 强制加载与禁用3DTiles
     void Force3DTilesLoad();
+    FBox GetTilesetBounds(ACesium3DTileset* Tileset);
     void DisableForce3DTilesLoad();
     void HandleTilesetLoaded();
 
