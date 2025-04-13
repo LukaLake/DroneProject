@@ -7344,7 +7344,7 @@ bool ADroneActor1::BuildSTSPCostMatrix(TArray<FDoubleArray>& OutCostMatrix)
 				AsyncTask(ENamedThreads::GameThread, [this, CurrentProgress]() {
 					OnPathGenerationProgress.Broadcast(CurrentProgress, TEXT("Building STSP Cost Matrix..."));
 					});
-				//UE_LOG(LogTemp, Log, TEXT("Progress: %.1f%%"), CurrentProgress);
+				UE_LOG(LogTemp, Log, TEXT("Progress: %.1f%%"), CurrentProgress);
 			}
 			//UE_LOG(LogTemp, Warning, TEXT("Building STSP Cost Matrix. Progress: %.1f%%"), CurrentProgress);
 
