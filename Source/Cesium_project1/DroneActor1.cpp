@@ -1662,7 +1662,7 @@ void ADroneActor1::GenerateTraditionalOrbitPath_Internal()
 			{
 				FPathPointWithOrientation& Viewpoint = Area.PathPoints[i];
 
-				FEvent* RenderCompleteEvent = FPlatformProcess::CreateSynchEvent(false);
+				TSharedPtr<FEvent, ESPMode::ThreadSafe> RenderCompleteEvent(FPlatformProcess::CreateSynchEvent(false));
 
 				// 在游戏线程中执行渲染
 				AsyncTask(ENamedThreads::GameThread, [this, &Viewpoint, RenderCompleteEvent]()
@@ -1714,14 +1714,11 @@ void ADroneActor1::GenerateTraditionalOrbitPath_Internal()
 					// 检查单个点是否等待超时
 					if (FPlatformTime::Seconds() - PointStartTime > SinglePointTimeout)
 					{
-						// 清理事件
-						FPlatformProcess::ReturnSynchEventToPool(RenderCompleteEvent);
+
 						UE_LOG(LogTemp, Warning, TEXT("Waiting for single viewpoint aesthetic score timed out"));
 						break;
 					}
 				}
-				// 清理事件
-				FPlatformProcess::ReturnSynchEventToPool(RenderCompleteEvent);
 			}
 
 			while (TaskCounter.GetValue() > 0)
@@ -5281,10 +5278,19 @@ void ADroneActor1::SelectBestViewpointGroups(
 		PrewarmNimaModelAfterCleanup();
 		for (FPathPointWithOrientation& Viewpoint : ScoredViewpoints)
 		{
-			AsyncTask(ENamedThreads::GameThread, [this, &Viewpoint, &TaskCounter, &CompletedPoints]()
+			TSharedPtr<FEvent, ESPMode::ThreadSafe> RenderCompleteEvent(FPlatformProcess::CreateSynchEvent(false));
+
+			// 在游戏线程中执行渲染
+			AsyncTask(ENamedThreads::GameThread, [this, &Viewpoint, RenderCompleteEvent]()
 				{
-					// 在游戏线程上调用渲染函数
 					RenderViewpointToRenderTarget(Viewpoint);
+					RenderCompleteEvent->Trigger(); // 渲染完成后触发事件
+				});
+
+			// 在后台线程中等待渲染完成
+			AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, [this, &Viewpoint, &TaskCounter, &CompletedPoints, RenderCompleteEvent]()
+				{
+					RenderCompleteEvent->Wait(); // 等待渲染完成
 
 					// 在游戏线程上运行推理任务
 					if (RenderTarget)
@@ -5388,10 +5394,20 @@ void ADroneActor1::SelectBestViewpointGroups(
 		if (AdjustPathPointForObstacles(Viewpoint, AOI))
 		{
 			Viewpoint.AestheticScore = -1; // 重置美学评分
-			AsyncTask(ENamedThreads::GameThread, [this, &Viewpoint, &TaskCounter]()
+
+			TSharedPtr<FEvent, ESPMode::ThreadSafe> RenderCompleteEvent(FPlatformProcess::CreateSynchEvent(false));
+			// 在游戏线程中执行渲染
+			AsyncTask(ENamedThreads::GameThread, [this, &Viewpoint, RenderCompleteEvent]()
 				{
-					// 在游戏线程上调用渲染函数
 					RenderViewpointToRenderTarget(Viewpoint);
+					RenderCompleteEvent->Trigger(); // 渲染完成后触发事件
+				});
+
+			// 在后台线程中等待渲染完成
+			AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, [this, &Viewpoint, &TaskCounter, RenderCompleteEvent]()
+				{				
+					RenderCompleteEvent->Wait(); // 等待渲染完成
+
 					// 在游戏线程上运行推理任务
 					if (RenderTarget)
 					{
@@ -6334,9 +6350,19 @@ TArray<FPathPointWithOrientation> ADroneActor1::GenerateSplinePath(
 		PrewarmNimaModelAfterCleanup();
 		for (FPathPointWithOrientation& Viewpoint : OutSplinePoints)
 		{
-			AsyncTask(ENamedThreads::GameThread, [this, &Viewpoint, &TaskCounter, &CompletedPoints]()
+			TSharedPtr<FEvent, ESPMode::ThreadSafe> RenderCompleteEvent(FPlatformProcess::CreateSynchEvent(false));
+			// 在游戏线程中执行渲染
+			AsyncTask(ENamedThreads::GameThread, [this, &Viewpoint, RenderCompleteEvent]()
 				{
 					RenderViewpointToRenderTarget(Viewpoint);
+					RenderCompleteEvent->Trigger(); // 渲染完成后触发事件
+				});
+
+			// 在后台线程中等待渲染完成
+			AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, [this, &Viewpoint, &TaskCounter, &CompletedPoints, RenderCompleteEvent]()
+				{
+					RenderCompleteEvent->Wait(); // 等待渲染完成
+
 					if (RenderTarget)
 					{
 						NimaTracker->RunInference(RenderTarget);
@@ -7056,9 +7082,21 @@ bool ADroneActor1::BuildAndProcessPathSegment(
 		//NimaTracker->CleanupResources();
 		for (FPathPointWithOrientation& Viewpoint : RRTPath)
 		{
-			AsyncTask(ENamedThreads::GameThread, [this, &Viewpoint, &TaskCounter, &CompletedPoints]()
+
+			TSharedPtr<FEvent, ESPMode::ThreadSafe> RenderCompleteEvent(FPlatformProcess::CreateSynchEvent(false));
+
+			// 在游戏线程中执行渲染
+			AsyncTask(ENamedThreads::GameThread, [this, &Viewpoint, RenderCompleteEvent]()
 				{
 					RenderViewpointToRenderTarget(Viewpoint);
+					RenderCompleteEvent->Trigger(); // 渲染完成后触发事件
+				});
+
+			// 在后台线程中等待渲染完成
+			AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, [this, &Viewpoint, &TaskCounter, &CompletedPoints, RenderCompleteEvent]()
+				{
+					RenderCompleteEvent->Wait(); // 等待渲染完成
+
 					if (RenderTarget)
 					{
 						NimaTracker->RunInference(RenderTarget);
