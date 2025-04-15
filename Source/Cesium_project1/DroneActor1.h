@@ -193,7 +193,10 @@ public:
 
     // 模型选择
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Model")
-	FString ModelPath;
+	FString ModelPath_Aesthetic;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Model")
+    FString ModelPath_Track;
 
     // RRT类
     UPROPERTY()

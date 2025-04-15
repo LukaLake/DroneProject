@@ -91,7 +91,8 @@ ADroneActor1::ADroneActor1()
 	bIsRecording = false;
 
 	// 默认模型
-	ModelPath = TEXT("/Models/light_nima.light_nima");
+	ModelPath_Aesthetic = TEXT("/Models/relic2_model.relic2_model");
+	ModelPath_Yolo = TEXT("/Models/yolo11m-seg.yolo11m-seg");
 
 	SpeedMultiplier = 30.0f;
 
@@ -310,7 +311,7 @@ void ADroneActor1::BeginPlay()
 	// ------------------- YOLO 模型加载 -------------------
 	// Specify the local path to your YOLO model file
 	// 无法直接引入ONNX文件，依然需要先导入为Asset，然后获取路径
-	ModelPath_Yolo = FPaths::Combine(TEXT("Game"), ModelPath); // 使用更轻量化的模型
+	ModelPath_Yolo = FPaths::Combine(TEXT("Game"), ModelPath_Track); // 使用更轻量化的模型
 
 	//ModelPath = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir() + TEXT("Resources")+TEXT("/pretrain_model/yolov8s.onnx"));
 
@@ -329,7 +330,7 @@ void ADroneActor1::BeginPlay()
 	}*/
 
 	// ------------------- NIMA 模型加载 -------------------
-	ModelPath_Nima = FPaths::Combine(TEXT("Game"), TEXT("/Models/light_nima.light_nima")); // 使用更轻量化的模型
+	ModelPath_Nima = FPaths::Combine(TEXT("Game"), ModelPath_Aesthetic); // 使用更轻量化的模型
 
 	NimaTracker = MakeShared<NimaObjectTracker>(ModelPath_Nima);
 }
@@ -1347,41 +1348,53 @@ void ADroneActor1::OnPredictAction()
 	if (NimaTracker) {
 		UE_LOG(LogTemp, Warning, TEXT("Predict action using Relic triggered."));
 
-		FPathPointWithOrientation ViewPoint = { GetActorLocation(),GetActorRotation(),90.0f };
+		FPathPointWithOrientation Viewpoint = { GetActorLocation(),GetActorRotation(),90.0f };
 		//Force3DTilesLoad(); // 强制加载 3D Tiles
 
 		NimaTracker->IfSaveImage = true;
-		// 在游戏线程上调用渲染函数
-		RenderViewpointToRenderTarget(ViewPoint);
+		TSharedPtr<FEvent, ESPMode::ThreadSafe> RenderCompleteEvent(FPlatformProcess::CreateSynchEvent(false));
 
-		// 在游戏线程上运行推理任务
-		if (RenderTarget)
-		{
-			UE_LOG(LogTemp, Warning, TEXT("Running inference on the game thread."));
-			NimaTracker->RunInference(RenderTarget);
-		}
-		else if (!RenderTarget) {
-			UE_LOG(LogTemp, Warning, TEXT("RenderTarget is null"));
-		}
+		// 在游戏线程中执行渲染
+		AsyncTask(ENamedThreads::GameThread, [this, &Viewpoint, RenderCompleteEvent]()
+			{
+				RenderViewpointToRenderTarget(Viewpoint);
+				RenderCompleteEvent->Trigger(); // 渲染完成后触发事件
+			});
 
-		// 等待异步推理完成,直到获取到有效的美学评分
-		while (NimaTracker->GetNimaScore() <= 0)
-		{
-			FPlatformProcess::Sleep(0.001f);
-		}
+		// 在后台线程中等待渲染完成
+		AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, [this, &Viewpoint, RenderCompleteEvent]()
+			{
+				RenderCompleteEvent->Wait(); // 等待渲染完成
 
-		ViewPoint.AestheticScore = NimaTracker->GetNimaScore();
-		SingleScore = ViewPoint.AestheticScore;
-		NimaTracker->ResetNimaScore(); // 重置美学评分
+				// 推理逻辑
+				NimaTracker->RunInference(RenderTarget);
 
+				// 等待推理完成
+				const float InferenceTimeout = 5.0f;
+				double InferenceStartTime = FPlatformTime::Seconds();
+				while (NimaTracker->GetNimaScore() <= 0)
+				{
+					FPlatformProcess::Sleep(0.001f);
+					if (FPlatformTime::Seconds() - InferenceStartTime > InferenceTimeout)
+					{
+						UE_LOG(LogTemp, Warning, TEXT("Inference timed out."));
+						break;
+					}
+				}
 
-		// 等待异步推理完成,直到获取到有效的美学评分
-		while (ViewPoint.AestheticScore <= 0)
-		{
-			FPlatformProcess::Sleep(0.001f);
-		}
+				if (NimaTracker->GetNimaScore() > 0)
+				{
+					Viewpoint.AestheticScore = NimaTracker->GetNimaScore();
+					UE_LOG(LogTemp, Warning, TEXT("Inference successful with score of %f"), Viewpoint.AestheticScore);
+					NimaTracker->ResetNimaScore();
+				}
+
+			});
+
 		NimaTracker->IfSaveImage = false;
 		//DisableForce3DTilesLoad();
+
+		SingleScore = Viewpoint.AestheticScore;
 
 		if (SingleScore != 0) {
 			UE_LOG(LogTemp, Warning, TEXT("Inference successful with score of %f"), SingleScore);
@@ -3094,7 +3107,7 @@ void ADroneActor1::SmoothGlobalPathPoints_PositionOrientation(int32 Iterations /
 			float YawDiff = FMath::Abs(FMath::FindDeltaAngleDegrees(PrevRot.Yaw, CurrRot.Yaw));
 			float PitchDiff = FMath::Abs(FMath::FindDeltaAngleDegrees(PrevRot.Pitch, CurrRot.Pitch));
 
-			const float MaxAngleDiff = 30.0f;
+			const float MaxAngleDiff = 20.0f;
 
 			if (YawDiff > MaxAngleDiff || PitchDiff > MaxAngleDiff)
 			{
