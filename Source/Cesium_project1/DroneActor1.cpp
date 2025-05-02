@@ -1852,6 +1852,8 @@ void ADroneActor1::GenerateTraditionalOrbitPath_Internal()
 
 	DisableForce3DTilesLoad();
 
+	ExportPathPointsToWGS84Txt();
+
 	// 在游戏线程中更新完成信息和美学评分统计
 	AsyncTask(ENamedThreads::GameThread, [this, AvgScore, MinScore, MaxScore, StdDev]() {
 		// 设置当前索引
