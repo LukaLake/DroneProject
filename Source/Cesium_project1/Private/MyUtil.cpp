@@ -1354,7 +1354,14 @@ bool NimaObjectTracker::RunInference(UTextureRenderTarget2D* RenderTarget)
 			}
 
 			if (LocalSaveImage && LocalScore > 0.0f && !BGRImageCopy.empty()) {
-				SaveImageToFile(BGRImageCopy, LocalScore);
+
+				//可以异步进行
+				//UE_LOG(LogTemp, Log, TEXT("Saving image with score: %f"), LocalScore);
+				AsyncTask(ENamedThreads::AnyNormalThreadNormalTask,
+					[this, BGRImageCopy,
+					LocalScore]() mutable {
+						SaveImageToFile(BGRImageCopy, LocalScore);
+					});
 			}
 
 		}
