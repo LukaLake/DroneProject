@@ -614,7 +614,7 @@ public:
 
     // 读取路径文件
     UFUNCTION(BlueprintCallable, Category = "Flight Path")
-    void OnReadPathFromFile();
+    void OnReadPathFromFile(bool bRecalculateDurations=true);
 
     // 截图功能
     void OnCaptureScreenshotWithUI(bool ifWithUI = true);

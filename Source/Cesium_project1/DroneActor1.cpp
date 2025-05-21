@@ -80,7 +80,7 @@ ADroneActor1::ADroneActor1()
 
 	bIsRightMousePressed = false;
 
-	bIsSlowMove = false;
+	bIsSlowMove = true;
 
 	bIsShowDebugPoints = false;
 	bIsShowGlobalPath = true;
@@ -1178,7 +1178,20 @@ void ADroneActor1::SetupPlayerInputComponent(UInputComponent* PlayerInputCompone
 	PlayerInputComponent->BindAction("RecordVideo", IE_Pressed, this, &ADroneActor1::OnRecordVideo);
 
 	// 绑定读取路径文件按键
-	PlayerInputComponent->BindAction("ReadPathFromFile", IE_Pressed, this, &ADroneActor1::OnReadPathFromFile);
+	// PlayerInputComponent->BindAction("ReadPathFromFile", IE_Pressed, this, &ADroneActor1::OnReadPathFromFile);
+
+	// 1) 创建一个 FInputActionBinding，指定 ActionName 和 EInputEvent
+	FInputActionBinding ReadPathFromFileBinding("ReadPathFromFile", IE_Pressed);
+
+	// 2) 给它的 ActionDelegate 绑定 Lambda
+	ReadPathFromFileBinding.ActionDelegate.GetDelegateForManualSet().BindLambda([this]()
+		{
+			// 在这里传参数
+			OnReadPathFromFile();
+		});
+
+	// 3) 把这个 Binding 加进 PlayerInputComponent
+	PlayerInputComponent->AddActionBinding(ReadPathFromFileBinding);
 
 	// 1) 创建一个 FInputActionBinding，指定 ActionName 和 EInputEvent
 	FInputActionBinding CaptureWithUIBinding("CaptureWithUI", IE_Pressed);
@@ -2992,7 +3005,7 @@ bool ADroneActor1::ImportPathPointsFromTxt(const FString& LoadFilePath)
 		// ...
 
 		LoadedPoints.Add(NewPt);
-		UE_LOG(LogTemp, Log, TEXT("Loaded id %d with FOV %.2f"), IndexNum, FOVVal);
+		//UE_LOG(LogTemp, Log, TEXT("Loaded id %d with FOV %.2f"), IndexNum, FOVVal);
 	}
 
 	// 7) 赋值到 GlobalPathPoints 或其它容器
@@ -8007,7 +8020,7 @@ void ADroneActor1::OnStartFlightAlongPath()
 //	GEngine->AddOnScreenDebugMessage(-1, 5.f, FColor::Green, FString::Printf(TEXT("Loaded most recent path file: %s"), *MostRecentFilePath));
 //}
 
-void ADroneActor1::OnReadPathFromFile()
+void ADroneActor1::OnReadPathFromFile(bool bRecalculateDurations)
 {
 	UE_LOG(LogTemp, Log, TEXT("Opening file selection dialog..."));
 
@@ -8020,6 +8033,10 @@ void ADroneActor1::OnReadPathFromFile()
 	// 必须在游戏线程中运行
 	if (!IsInGameThread())
 	{
+		// 注意：如果原始调用是通过输入绑定的，它不会传递参数。
+		// 如果希望从非游戏线程调用并传递参数，需要调整此处的 lambda。
+		// 例如: AsyncTask(ENamedThreads::GameThread, [this, bRecalculateDurations]() { OnReadPathFromFile(bRecalculateDurations); });
+		// 但由于输入绑定不直接支持参数，这里保持原样，默认行为将是 true。
 		AsyncTask(ENamedThreads::GameThread, [this]() { OnReadPathFromFile(); });
 		return;
 	}
@@ -8079,9 +8096,32 @@ void ADroneActor1::OnReadPathFromFile()
 	{
 		AnalyzePathSafetyDistances(GlobalPathPoints);
 
+		if (bRecalculateDurations)
+		{
+			// 设置初始点，PrecomputeAllDuration 依赖 OriginalPathPoint
+			// 如果 GlobalPathPoints 为空，这可能会有问题，但 ImportPathPointsFromTxt 成功后应该不会为空
+			if (GlobalPathPoints.Num() > 0)
+			{
+				OriginalPathPoint = GlobalPathPoints[0]; // 或者使用 Actor 的当前位置作为回退
+			}
+			else
+			{
+				OriginalPathPoint.Point = GetActorLocation();
+				OriginalPathPoint.Orientation = GetActorRotation();
+				OriginalPathPoint.FOV = CameraComponent->FieldOfView;
+			}
+			PrecomputeAllDuration(); // 根据参数决定是否重新计算
+			UE_LOG(LogTemp, Log, TEXT("Path durations recalculated."));
+		}
+		else
+		{
+			UE_LOG(LogTemp, Log, TEXT("Skipping path duration recalculation."));
+		}
+
 		// 启用路径点绘制
 		bShouldDrawPathPoints = true;
 		fGenerationFinished = true;
+		currentIndex = 0; // 重置飞行索引
 
 		// 显示成功消息
 		FString FileName = FPaths::GetCleanFilename(SelectedFile);
@@ -8090,56 +8130,6 @@ void ADroneActor1::OnReadPathFromFile()
 	else
 	{
 		GEngine->AddOnScreenDebugMessage(-1, 5.f, FColor::Red, TEXT("路径文件加载失败!"));
-	}
-}
-
-
-void ADroneActor1::OnStartTracking()
-{
-	if (bIsTrackingActive)
-	{
-		// If tracking is active, stop tracking
-		YoloTracker->StopTracking();
-		bIsTrackingActive = false;
-		UE_LOG(LogTemp, Warning, TEXT("Tracking stopped."));
-	}
-	else {
-		FVector2D MousePosition;
-
-		if (GetWorld()->GetFirstPlayerController()->GetMousePosition(MousePosition.X, MousePosition.Y))
-		{
-			// 创建或重用 RenderTarget
-			if (!RenderTarget)
-			{
-				// 使用 TSharedPtr 管理 RenderTarget
-				//RenderTarget = MakeShareable(NewObject<UTextureRenderTarget2D>(this, TEXT("ScreenShot")));
-
-				RenderTarget = NewObject<UTextureRenderTarget2D>(this, TEXT("ScreenShot"));
-
-				RenderTarget->InitAutoFormat(ViewportWidth, ViewportHeight);
-				RenderTarget->UpdateResourceImmediate(true);
-				SceneCaptureComponent->TextureTarget = RenderTarget;
-
-				// 配置 SceneCaptureComponent 以确保捕捉正确的渲染内容
-				SceneCaptureComponent->CaptureSource = ESceneCaptureSource::SCS_FinalColorLDR; // 关键在于使用最终颜色而不是深度或其他
-				/*SceneCaptureComponent->PostProcessSettings.bOverride_BloomIntensity = true;
-				SceneCaptureComponent->PostProcessSettings.BloomIntensity = 1.0f;*/
-				// 根据需要添加更多后处理设置
-
-				UE_LOG(LogTemp, Log, TEXT("RenderTarget initialized with size: %dx%d"), ViewportWidth, ViewportHeight);
-			}
-			SceneCaptureComponent->CaptureScene();
-
-			// Start tracking using the render target and mouse click position
-			YoloTracker->StartTracking(RenderTarget, MousePosition);
-			LastTrackedPosition = MousePosition; // Initialize tracking position
-			UE_LOG(LogTemp, Warning, TEXT("Tracking started at mouse position (%f, %f)."), MousePosition.X, MousePosition.Y);
-			bIsTrackingActive = true;
-		}
-		else
-		{
-			UE_LOG(LogTemp, Warning, TEXT("Failed to get mouse position."));
-		}
 	}
 }
 
