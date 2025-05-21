@@ -25,6 +25,10 @@
 #include "Engine/GameViewportClient.h"
 #include "Misc/Paths.h"
 
+#include "DesktopPlatformModule.h"
+#include "IDesktopPlatform.h"
+#include "Misc/FileHelper.h"
+#include "HAL/PlatformApplicationMisc.h"
 
 // 渲染相关头文件分组
 #include "HighResScreenshot.h"
@@ -7951,38 +7955,61 @@ void ADroneActor1::OnStartFlightAlongPath()
 }
 
 
-void ADroneActor1::OnReadPathFromFile() {
+//void ADroneActor1::OnReadPathFromFile() {
+//
+//	UE_LOG(LogTemp, Log, TEXT("Reading path from file..."));
+//	// 获取项目目录
+//	FString ProjectDir = FPaths::ProjectDir();
+//
+//	// 查找所有符合命名规则的文件
+//	TArray<FString> FoundFiles;
+//	IFileManager::Get().FindFiles(FoundFiles, *(ProjectDir + TEXT("Path_*.txt")), true, false);
+//
+//	if (FoundFiles.Num() == 0)
+//	{
+//		GEngine->AddOnScreenDebugMessage(-1, 5.f, FColor::Red, TEXT("No path files found!"));
+//		return;
+//	}
+//
+//	// 按修改时间排序文件
+//	FoundFiles.Sort([&](const FString& A, const FString& B) {
+//		FDateTime TimeA = IFileManager::Get().GetTimeStamp(*(ProjectDir + A));
+//		FDateTime TimeB = IFileManager::Get().GetTimeStamp(*(ProjectDir + B));
+//		return TimeA > TimeB; // 降序排列，最近的文件在前
+//		});
+//
+//	// 获取最近的文件路径
+//	FString MostRecentFilePath = ProjectDir + FoundFiles[0];
+//
+//	// 检查文件是否存在
+//	if (!FPaths::FileExists(MostRecentFilePath))
+//	{
+//		GEngine->AddOnScreenDebugMessage(-1, 5.f, FColor::Red, TEXT("Most recent path file not found!"));
+//		return;
+//	}
+//
+//	if (bIsGeneratingPath)
+//	{
+//		UE_LOG(LogTemp, Warning, TEXT("Path generation already in progress"));
+//		return;
+//	}
+//
+//	// 读取路径点
+//	ImportPathPointsFromTxt(MostRecentFilePath);
+//
+//	AnalyzePathSafetyDistances(GlobalPathPoints);
+//
+//	// 启用路径点绘制
+//	bShouldDrawPathPoints = true;
+//	fGenerationFinished = true;
+//
+//	// 显示成功消息
+//	GEngine->AddOnScreenDebugMessage(-1, 5.f, FColor::Green, FString::Printf(TEXT("Loaded most recent path file: %s"), *MostRecentFilePath));
+//}
 
-	UE_LOG(LogTemp, Log, TEXT("Reading path from file..."));
-	// 获取项目目录
-	FString ProjectDir = FPaths::ProjectDir();
-
-	// 查找所有符合命名规则的文件
-	TArray<FString> FoundFiles;
-	IFileManager::Get().FindFiles(FoundFiles, *(ProjectDir + TEXT("Path_*.txt")), true, false);
-
-	if (FoundFiles.Num() == 0)
-	{
-		GEngine->AddOnScreenDebugMessage(-1, 5.f, FColor::Red, TEXT("No path files found!"));
-		return;
-	}
-
-	// 按修改时间排序文件
-	FoundFiles.Sort([&](const FString& A, const FString& B) {
-		FDateTime TimeA = IFileManager::Get().GetTimeStamp(*(ProjectDir + A));
-		FDateTime TimeB = IFileManager::Get().GetTimeStamp(*(ProjectDir + B));
-		return TimeA > TimeB; // 降序排列，最近的文件在前
-		});
-
-	// 获取最近的文件路径
-	FString MostRecentFilePath = ProjectDir + FoundFiles[0];
-
-	// 检查文件是否存在
-	if (!FPaths::FileExists(MostRecentFilePath))
-	{
-		GEngine->AddOnScreenDebugMessage(-1, 5.f, FColor::Red, TEXT("Most recent path file not found!"));
-		return;
-	}
+void ADroneActor1::OnReadPathFromFile()
+{
+	UE_LOG(LogTemp, Log, TEXT("Opening file selection dialog..."));
 
 	if (bIsGeneratingPath)
 	{
@@ -7990,17 +8017,80 @@ void ADroneActor1::OnReadPathFromFile() {
 		return;
 	}
 
+	// 必须在游戏线程中运行
+	if (!IsInGameThread())
+	{
+		AsyncTask(ENamedThreads::GameThread, [this]() { OnReadPathFromFile(); });
+		return;
+	}
+
+	// 获取桌面平台模块
+	FDesktopPlatformModule& DesktopPlatformModule = FModuleManager::LoadModuleChecked<FDesktopPlatformModule>("DesktopPlatform");
+	IDesktopPlatform* DesktopPlatform = DesktopPlatformModule.Get();
+
+	if (!DesktopPlatform)
+	{
+		UE_LOG(LogTemp, Error, TEXT("Failed to get desktop platform module"));
+		return;
+	}
+
+	// 获取父窗口句柄
+	void* ParentWindowHandle = nullptr;
+	if (GEngine && GEngine->GameViewport && GEngine->GameViewport->GetWindow())
+	{
+		ParentWindowHandle = GEngine->GameViewport->GetWindow()->GetNativeWindow()->GetOSWindowHandle();
+	}
+
+	// 设置文件对话框选项
+	TArray<FString> OutFilenames;
+	FString DefaultPath = FPaths::ProjectDir();
+	FString DefaultFile = TEXT("");
+	FString FileTypes = TEXT("飞行路径文件|Path_*.txt|所有文件|*.*");
+	uint32 Flags = 0; // 可以根据需要添加标志
+
+	// 打开文件选择对话框
+	bool bOpened = DesktopPlatform->OpenFileDialog(
+		ParentWindowHandle,
+		TEXT("选择飞行路径文件"),
+		DefaultPath,
+		DefaultFile,
+		FileTypes,
+		Flags,
+		OutFilenames
+	);
+
+	if (!bOpened || OutFilenames.Num() == 0)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("No file selected"));
+		return;
+	}
+
+	FString SelectedFile = OutFilenames[0];
+
+	// 检查文件是否存在
+	if (!FPaths::FileExists(SelectedFile))
+	{
+		GEngine->AddOnScreenDebugMessage(-1, 5.f, FColor::Red, TEXT("Selected file not found!"));
+		return;
+	}
+
 	// 读取路径点
-	ImportPathPointsFromTxt(MostRecentFilePath);
+	if (ImportPathPointsFromTxt(SelectedFile))
+	{
+		AnalyzePathSafetyDistances(GlobalPathPoints);
 
-	AnalyzePathSafetyDistances(GlobalPathPoints);
+		// 启用路径点绘制
+		bShouldDrawPathPoints = true;
+		fGenerationFinished = true;
 
-	// 启用路径点绘制
-	bShouldDrawPathPoints = true;
-	fGenerationFinished = true;
-
-	// 显示成功消息
-	GEngine->AddOnScreenDebugMessage(-1, 5.f, FColor::Green, FString::Printf(TEXT("Loaded most recent path file: %s"), *MostRecentFilePath));
+		// 显示成功消息
+		FString FileName = FPaths::GetCleanFilename(SelectedFile);
+		GEngine->AddOnScreenDebugMessage(-1, 5.f, FColor::Green, FString::Printf(TEXT("成功加载飞行路径: %s"), *FileName));
+	}
+	else
+	{
+		GEngine->AddOnScreenDebugMessage(-1, 5.f, FColor::Red, TEXT("路径文件加载失败!"));
+	}
 }
 
 
