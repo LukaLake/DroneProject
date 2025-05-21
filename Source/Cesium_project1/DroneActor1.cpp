@@ -634,6 +634,9 @@ void ADroneActor1::PrecomputeAllDuration()
 			localOriginalPathPoint = GlobalPathPoints[i - 1];
 		}
 		else {
+			OriginalPathPoint.Point = GetActorLocation();
+			OriginalPathPoint.Orientation = GetActorRotation();
+			OriginalPathPoint.FOV = CameraComponent->FieldOfView;
 			localOriginalPathPoint = OriginalPathPoint;
 		}
 
@@ -669,7 +672,7 @@ void ADroneActor1::PrecomputeAllDuration()
 		{
 			float ForcedMinRotationDuration = 3.0f;
 			// 慢速移动模式，旋转时间取移动和旋转中更大的那个
-			localTototalRotationDurtation = FMath::Max(MoveDuration, ForcedMinRotationDuration);
+			localTototalRotationDurtation = FMath::Max(MoveDuration, MinRotationDuration);
 		}
 		else
 		{
@@ -1052,7 +1055,7 @@ void ADroneActor1::Tick(float DeltaTime)
 
 		bool bRotationFinished = true;
 		if (bIsSlowMove) {
-			bRotationFinished = (abs(CurrentRotationTime - TotalRotationDuration) <= 0.01f) ? true : false;
+			bRotationFinished = (CurrentRotationTime - TotalRotationDuration >= 0.01f) ? true : false;
 		}
 
 		if (DistanceRemaining <= ReachThreshold && bRotationFinished)
@@ -8098,18 +8101,7 @@ void ADroneActor1::OnReadPathFromFile(bool bRecalculateDurations)
 
 		if (bRecalculateDurations)
 		{
-			// 设置初始点，PrecomputeAllDuration 依赖 OriginalPathPoint
-			// 如果 GlobalPathPoints 为空，这可能会有问题，但 ImportPathPointsFromTxt 成功后应该不会为空
-			if (GlobalPathPoints.Num() > 0)
-			{
-				OriginalPathPoint = GlobalPathPoints[0]; // 或者使用 Actor 的当前位置作为回退
-			}
-			else
-			{
-				OriginalPathPoint.Point = GetActorLocation();
-				OriginalPathPoint.Orientation = GetActorRotation();
-				OriginalPathPoint.FOV = CameraComponent->FieldOfView;
-			}
+			// 设置初始点，PrecomputeAllDuration 依赖 OriginalPathPoint			
 			PrecomputeAllDuration(); // 根据参数决定是否重新计算
 			UE_LOG(LogTemp, Log, TEXT("Path durations recalculated."));
 		}
